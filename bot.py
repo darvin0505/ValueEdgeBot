@@ -121,8 +121,14 @@ def is_today_and_future(iso_date):
     return event_time.date() == now.date() and event_time > now
 
 
-def get_candidates(sport_keys=None):
-    candidates = []
+def get_analyzed_events(sport_keys=None):
+    """Devuelve todos los partidos de hoy con una cuota analizable.
+
+    La marca ``is_opportunity`` deja que los comandos manuales muestren el
+    analisis completo, sin cambiar el filtro estricto de los avisos
+    automaticos.
+    """
+    events_to_show = []
     keys = sport_keys or SPORTS.keys()
     for sport_key in keys:
         info = SPORTS[sport_key]
@@ -135,13 +141,24 @@ def get_candidates(sport_keys=None):
             if not is_today_and_future(event.get("commence_time")):
                 continue
             pick = best_market_pick(event, sport_key)
-            if pick and pick["probability"] >= info["minimum"]:
-                candidates.append({
+            if pick:
+                events_to_show.append({
                     "id": event["id"], "sport_key": sport_key, "league": info["name"], "emoji": info["emoji"],
                     "home_team": event["home_team"], "away_team": event["away_team"], "commence_time": event["commence_time"],
+                    "minimum_probability": info["minimum"],
+                    "is_opportunity": pick["probability"] >= info["minimum"],
                     **pick,
                 })
-    return sorted(candidates, key=lambda item: item["probability"], reverse=True)
+    return sorted(events_to_show, key=lambda item: (item["commence_time"], -item["probability"]))
+
+
+def get_candidates(sport_keys=None):
+    """Devuelve solo oportunidades para los avisos automaticos y /best."""
+    return sorted(
+        (event for event in get_analyzed_events(sport_keys) if event["is_opportunity"]),
+        key=lambda item: item["probability"],
+        reverse=True,
+    )
 
 
 def pick_message(pick):
@@ -153,6 +170,22 @@ def pick_message(pick):
         f"Probabilidad estimada: {pick['probability']:.0%}\n"
         f"Mejor cuota: {pick['odds']:.2f}\n"
         f"Inicio: {iso_to_local(pick['commence_time'])}"
+    )
+
+
+def analysis_message(event):
+    if event["is_opportunity"]:
+        status = "✅ OPORTUNIDAD"
+    else:
+        status = f"👀 EN SEGUIMIENTO (filtro: {event['minimum_probability']:.0%})"
+    return (
+        f"{event['emoji']} {status}\n"
+        f"{event['league']}\n"
+        f"{event['home_team']} vs {event['away_team']}\n"
+        f"Mejor seleccion: {event['outcome']}\n"
+        f"Probabilidad estimada: {event['probability']:.0%}\n"
+        f"Mejor cuota: {event['odds']:.2f}\n"
+        f"Inicio: {iso_to_local(event['commence_time'])}"
     )
 
 
@@ -248,8 +281,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def show_picks(update: Update, sport_keys=None):
+async def show_picks(update: Update, sport_keys=None, show_all=False):
     await update.message.reply_text("Buscando las mejores oportunidades...")
+    if show_all:
+        events = await asyncio.to_thread(get_analyzed_events, sport_keys)
+        if not events:
+            await update.message.reply_text("No hay partidos de hoy con cuotas disponibles para analizar.")
+            return
+        opportunities = sum(event["is_opportunity"] for event in events)
+        if opportunities:
+            summary = f"Hay {opportunities} oportunidad(es) y {len(events) - opportunities} partido(s) en seguimiento."
+        else:
+            summary = "No hay oportunidades que cumplan el filtro ahora, pero estos son los partidos disponibles para analizar."
+        await update.message.reply_text(summary)
+        for event in events:
+            await update.message.reply_text(analysis_message(event))
+        return
     picks = await asyncio.to_thread(get_candidates, sport_keys)
     if not picks:
         await update.message.reply_text("No hay oportunidades que cumplan el filtro ahora.")
@@ -263,11 +310,11 @@ async def best(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def futbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_picks(update, [key for key in SPORTS if key.startswith("soccer_")])
+    await show_picks(update, [key for key in SPORTS if key.startswith("soccer_")], show_all=True)
 
 
 async def mlb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_picks(update, ["baseball_mlb"])
+    await show_picks(update, ["baseball_mlb"], show_all=True)
 
 
 async def post_init(application):
