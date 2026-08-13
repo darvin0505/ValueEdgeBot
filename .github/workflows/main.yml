@@ -1,0 +1,30 @@
+name: ValueEdgeBot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * *"
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar ValueEdgeBot
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: |
+          pip install requests python-dotenv python-telegram-bot
+
+      - name: Ejecutar ValueEdgeBot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: |
+          python bot.py
