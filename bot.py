@@ -1,345 +1,2340 @@
 import asyncio
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
 
+# =========================================================
+# VALUEEDGEBOT
+# MLB + FUTBOL + NBA
+# Odds-API.io
+# DraftKings + FanDuel
+# =========================================================
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
-BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
-# Configuracion
-RESULT_CHECK_INTERVAL_SECONDS = 600
-SCHEDULER_TICK_SECONDS = 30
-# Usa la zona horaria configurada en Windows. En este equipo es Nueva York,
-# y asi no depende del paquete opcional tzdata.
-BOT_TIMEZONE = datetime.now().astimezone().tzinfo
-MAX_PICKS_PER_SCAN = 3
-FOOTBALL_MIN_PROBABILITY = 0.58
-MLB_MIN_PROBABILITY = 0.65
+BASE_URL = "https://api.odds-api.io/v3"
+NY_TZ = ZoneInfo("America/New_York")
+
 STATE_FILE = "valueedge_state.json"
 
-# Puedes quitar ligas que no te interesen. Todos los soccer_* son futbol.
-SPORTS = {
-    "soccer_epl": {"name": "Futbol - Premier League", "emoji": "⚽", "minimum": FOOTBALL_MIN_PROBABILITY},
-    "soccer_spain_la_liga": {"name": "Futbol - La Liga", "emoji": "⚽", "minimum": FOOTBALL_MIN_PROBABILITY},
-    "soccer_italy_serie_a": {"name": "Futbol - Serie A", "emoji": "⚽", "minimum": FOOTBALL_MIN_PROBABILITY},
-    "soccer_germany_bundesliga": {"name": "Futbol - Bundesliga", "emoji": "⚽", "minimum": FOOTBALL_MIN_PROBABILITY},
-    "soccer_france_ligue_one": {"name": "Futbol - Ligue 1", "emoji": "⚽", "minimum": FOOTBALL_MIN_PROBABILITY},
-    "baseball_mlb": {"name": "MLB", "emoji": "⚾", "minimum": MLB_MIN_PROBABILITY},
+AUTO_HOUR = 8
+AUTO_MINUTE = 0
+
+AUTO_TOP = 5
+MANUAL_MIN = 7
+
+BOOKMAKERS = "DraftKings,FanDuel"
+
+
+# =========================================================
+# LIGAS DE FUTBOL
+# =========================================================
+
+SOCCER_LEAGUES = {
+    "england-premier-league": "Premier League",
+    "spain-la-liga": "La Liga",
+    "italy-serie-a": "Serie A",
+    "germany-bundesliga": "Bundesliga",
+    "france-ligue-1": "Ligue 1",
+    "usa-mls": "MLS",
+    "uefa-champions-league": "Champions League",
+    "uefa-europa-league": "Europa League",
 }
 
 
 if not BOT_TOKEN:
-    raise ValueError("Falta BOT_TOKEN en el archivo .env")
-if not ODDS_API_KEY:
-    raise ValueError("Falta ODDS_API_KEY en el archivo .env")
+    raise ValueError("Falta BOT_TOKEN en .env")
 
+if not ODDS_API_KEY:
+    raise ValueError("Falta ODDS_API_KEY en .env")
+
+
+# =========================================================
+# ESTADO
+# =========================================================
 
 def load_state():
-    default = {"picks": {}, "subscribers": []}
+
+    default = {
+        "subscribers": [],
+        "picks": {},
+        "last_auto": None
+    }
+
     if not os.path.exists(STATE_FILE):
         return default
+
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as file:
-            state = json.load(file)
-        state.setdefault("picks", {})
-        state.setdefault("subscribers", [])
+
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            state = json.load(f)
+
+        state.setdefault(
+            "subscribers",
+            []
+        )
+
+        state.setdefault(
+            "picks",
+            {}
+        )
+
+        state.setdefault(
+            "last_auto",
+            None
+        )
+
         return state
-    except (OSError, json.JSONDecodeError):
+
+    except Exception:
+
         return default
-
-
-def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as file:
-        json.dump(state, file, ensure_ascii=False, indent=2)
 
 
 STATE = load_state()
 
 
-def api_get(path, params=None):
-    query = {"apiKey": ODDS_API_KEY}
+def save_state():
+
+    with open(
+        STATE_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            STATE,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
+# =========================================================
+# FECHA / HORA
+# =========================================================
+
+def now_ny():
+
+    return datetime.now(NY_TZ)
+
+
+def local_datetime(iso):
+
+    try:
+
+        dt = datetime.fromisoformat(
+            iso.replace(
+                "Z",
+                "+00:00"
+            )
+        )
+
+        return dt.astimezone(
+            NY_TZ
+        )
+
+    except Exception:
+
+        return None
+
+
+def valid_event_date(event):
+
+    iso = event.get(
+        "date",
+        event.get(
+            "commence_time",
+            ""
+        )
+    )
+
+    dt = local_datetime(iso)
+
+    if not dt:
+        return False
+
+    today = now_ny().date()
+
+    tomorrow = (
+        today +
+        timedelta(days=1)
+    )
+
+    return dt.date() in (
+        today,
+        tomorrow
+    )
+
+
+def date_text(iso):
+
+    dt = local_datetime(iso)
+
+    if not dt:
+        return "N/A"
+
+    return dt.strftime(
+        "%m/%d/%Y"
+    )
+
+
+def time_text(iso):
+
+    dt = local_datetime(iso)
+
+    if not dt:
+        return "N/A"
+
+    return dt.strftime(
+        "%I:%M %p"
+    ).lstrip("0")
+
+
+# =========================================================
+# API
+# =========================================================
+
+def api_get(
+    path,
+    params=None
+):
+
+    query = {
+        "apiKey": ODDS_API_KEY
+    }
+
     if params:
         query.update(params)
-    response = requests.get(f"{BASE_URL}/{path}", params=query, timeout=25)
-    response.raise_for_status()
-    return response.json()
 
-
-def iso_to_local(iso_date):
     try:
-        date = datetime.fromisoformat(iso_date.replace("Z", "+00:00"))
-        return date.astimezone(BOT_TIMEZONE).strftime("%d/%m %H:%M")
-    except (TypeError, ValueError):
-        return iso_date
 
+        response = requests.get(
+            f"{BASE_URL}/{path}",
+            params=query,
+            timeout=30
+        )
 
-def best_market_pick(event, sport_key):
-    """Devuelve la seleccion con mayor probabilidad implicita sin margen de la casa."""
-    markets = []
-    for bookmaker in event.get("bookmakers", []):
-        for market in bookmaker.get("markets", []):
-            if market.get("key") == "h2h" and market.get("outcomes"):
-                markets.append(market["outcomes"])
+    except Exception as error:
 
-    if not markets:
+        print(
+            f"API CONNECTION ERROR: {error}"
+        )
+
         return None
 
-    # Tomamos la mejor cuota decimal disponible de cada posible resultado.
-    best_prices = {}
-    for outcomes in markets:
-        for outcome in outcomes:
-            name = outcome.get("name")
-            price = outcome.get("price")
-            if name and isinstance(price, (int, float)) and price > 1:
-                best_prices[name] = max(best_prices.get(name, 0), price)
+    if response.status_code != 200:
 
-    if len(best_prices) < 2:
+        print(
+            f"API ERROR {response.status_code}: "
+            f"{response.text[:500]}"
+        )
+
         return None
-    raw = {name: 1 / price for name, price in best_prices.items()}
-    total = sum(raw.values())
-    if not total:
-        return None
-    outcome, probability = max(((name, value / total) for name, value in raw.items()), key=lambda item: item[1])
-    return {"outcome": outcome, "probability": probability, "odds": best_prices[outcome]}
 
-
-def is_today_and_future(iso_date):
     try:
-        event_time = datetime.fromisoformat(iso_date.replace("Z", "+00:00")).astimezone(BOT_TIMEZONE)
-    except (TypeError, ValueError):
-        return False
-    now = datetime.now(BOT_TIMEZONE)
-    return event_time.date() == now.date() and event_time > now
+
+        return response.json()
+
+    except Exception:
+
+        print(
+            "API ERROR: respuesta no JSON"
+        )
+
+        return None
 
 
-def get_analyzed_events(sport_keys=None):
-    """Devuelve todos los partidos de hoy con una cuota analizable.
+# =========================================================
+# EVENTOS
+# =========================================================
 
-    La marca ``is_opportunity`` deja que los comandos manuales muestren el
-    analisis completo, sin cambiar el filtro estricto de los avisos
-    automaticos.
-    """
-    events_to_show = []
-    keys = sport_keys or SPORTS.keys()
-    for sport_key in keys:
-        info = SPORTS[sport_key]
-        try:
-            events = api_get(f"{sport_key}/odds", {"regions": "us,eu", "markets": "h2h", "oddsFormat": "decimal"})
-        except requests.RequestException as error:
-            print(f"No se pudieron consultar {sport_key}: {error}")
-            continue
+def get_events(
+    sport,
+    league=None,
+    limit=100
+):
+
+    params = {
+        "sport": sport,
+        "status": "pending",
+        "limit": limit,
+        "bookmaker": "DraftKings"
+    }
+
+    if league:
+        params["league"] = league
+
+    data = api_get(
+        "events",
+        params
+    )
+
+    if not data:
+        return []
+
+    return [
+        event
+        for event in data
+        if valid_event_date(event)
+    ]
+
+
+def get_soccer_events():
+
+    result = []
+
+    for league_slug, league_name in SOCCER_LEAGUES.items():
+
+        events = get_events(
+            "football",
+            league_slug,
+            100
+        )
+
         for event in events:
-            if not is_today_and_future(event.get("commence_time")):
-                continue
-            pick = best_market_pick(event, sport_key)
-            if pick:
-                events_to_show.append({
-                    "id": event["id"], "sport_key": sport_key, "league": info["name"], "emoji": info["emoji"],
-                    "home_team": event["home_team"], "away_team": event["away_team"], "commence_time": event["commence_time"],
-                    "minimum_probability": info["minimum"],
-                    "is_opportunity": pick["probability"] >= info["minimum"],
-                    **pick,
-                })
-    return sorted(events_to_show, key=lambda item: (item["commence_time"], -item["probability"]))
+
+            event["_league"] = (
+                league_name
+            )
+
+            event["_sport_key"] = (
+                "football"
+            )
+
+        result.extend(events)
+
+    return result
 
 
-def get_candidates(sport_keys=None):
-    """Devuelve solo oportunidades para los avisos automaticos y /best."""
-    return sorted(
-        (event for event in get_analyzed_events(sport_keys) if event["is_opportunity"]),
-        key=lambda item: item["probability"],
-        reverse=True,
+def get_mlb_events():
+
+    events = get_events(
+        "baseball",
+        None,
+        100
     )
 
+    for event in events:
 
-def pick_message(pick):
-    return (
-        f"{pick['emoji']} RECOMENDACION\n"
-        f"{pick['league']}\n"
-        f"{pick['home_team']} vs {pick['away_team']}\n"
-        f"Seleccion: {pick['outcome']}\n"
-        f"Probabilidad estimada: {pick['probability']:.0%}\n"
-        f"Mejor cuota: {pick['odds']:.2f}\n"
-        f"Inicio: {iso_to_local(pick['commence_time'])}"
+        event["_league"] = "MLB"
+        event["_sport_key"] = (
+            "baseball"
+        )
+
+    return events
+
+
+def get_nba_events():
+
+    events = get_events(
+        "basketball",
+        None,
+        100
     )
 
+    for event in events:
 
-def analysis_message(event):
-    if event["is_opportunity"]:
-        status = "✅ OPORTUNIDAD"
-    else:
-        status = f"👀 EN SEGUIMIENTO (filtro: {event['minimum_probability']:.0%})"
-    return (
-        f"{event['emoji']} {status}\n"
-        f"{event['league']}\n"
-        f"{event['home_team']} vs {event['away_team']}\n"
-        f"Mejor seleccion: {event['outcome']}\n"
-        f"Probabilidad estimada: {event['probability']:.0%}\n"
-        f"Mejor cuota: {event['odds']:.2f}\n"
-        f"Inicio: {iso_to_local(event['commence_time'])}"
+        event["_league"] = "NBA"
+        event["_sport_key"] = (
+            "basketball"
+        )
+
+    return events
+
+
+# =========================================================
+# ODDS
+# =========================================================
+
+def get_odds_for_events(events):
+
+    if not events:
+        return []
+
+    result = []
+
+    # Consultamos hasta 10 eventos por llamada.
+    # Odds-API.io permite eventIds separados por comas.
+    for i in range(0, len(events), 10):
+
+        batch = events[i:i + 10]
+
+        ids = ",".join(
+            str(event["id"])
+            for event in batch
+            if event.get("id") is not None
+        )
+
+        if not ids:
+            continue
+
+        data = api_get(
+            "odds/multi",
+            {
+                "eventIds": ids,
+                "bookmakers": BOOKMAKERS
+            }
+        )
+
+        if not data:
+            continue
+
+        if isinstance(data, list):
+            result.extend(data)
+
+        elif isinstance(data, dict):
+            result.append(data)
+
+    return result
+
+def attach_odds(events):
+
+    odds_data = get_odds_for_events(
+        events
     )
 
+    odds_map = {
+        item["id"]: item
+        for item in odds_data
+        if item.get("id") is not None
+    }
 
-async def send_new_picks(application):
-    candidates = await asyncio.to_thread(get_candidates)
-    new_picks = [pick for pick in candidates if pick["id"] not in STATE["picks"]][:MAX_PICKS_PER_SCAN]
-    if not new_picks:
-        return
-    for pick in new_picks:
-        pick["sent_to"] = list(STATE["subscribers"])
-        pick["sent_at"] = datetime.now(timezone.utc).isoformat()
-        STATE["picks"][pick["id"]] = pick
-        for chat_id in pick["sent_to"]:
-            try:
-                await application.bot.send_message(chat_id=chat_id, text=pick_message(pick))
-            except Exception as error:
-                print(f"No se pudo enviar a {chat_id}: {error}")
-    save_state(STATE)
+    result = []
+
+    for event in events:
+
+        event_id = event.get(
+            "id"
+        )
+
+        odds = odds_map.get(
+            event_id
+        )
+
+        if not odds:
+            continue
+
+        event["_odds"] = odds
+
+        result.append(event)
+
+    return result
 
 
-def result_for_pick(pick, event):
-    scores = {score["name"]: score.get("score") for score in event.get("scores", [])}
-    home = scores.get(pick["home_team"])
-    away = scores.get(pick["away_team"])
+# =========================================================
+# PROBABILIDAD
+# =========================================================
+
+def american_probability(price):
+
     try:
-        home, away = float(home), float(away)
-    except (TypeError, ValueError):
+
+        price = float(price)
+
+    except Exception:
+
+        return 0
+
+    if price > 0:
+
+        return 100 / (
+            price + 100
+        )
+
+    return abs(price) / (
+        abs(price) + 100
+    )
+
+
+def american(price):
+
+    try:
+
+        price = float(price)
+
+        if price > 0:
+            return f"+{int(price)}"
+
+        return str(int(price))
+
+    except Exception:
+
+        return str(price)
+
+
+def bar(probability):
+
+    width = 12
+
+    filled = round(
+        probability * width
+    )
+
+    filled = max(
+        0,
+        min(
+            width,
+            filled
+        )
+    )
+
+    return (
+        "█" * filled +
+        "░" * (
+            width - filled
+        )
+    )
+
+
+# =========================================================
+# NORMALIZAR EVENTO
+# =========================================================
+
+def event_home(event):
+
+    return event.get(
+        "home",
+        event.get(
+            "home_team",
+            "N/A"
+        )
+    )
+
+
+def event_away(event):
+
+    return event.get(
+        "away",
+        event.get(
+            "away_team",
+            "N/A"
+        )
+    )
+
+
+def event_date(event):
+
+    return event.get(
+        "date",
+        event.get(
+            "commence_time",
+            ""
+        )
+    )
+
+
+# =========================================================
+# MONEYLINE
+# =========================================================
+
+def get_h2h(event):
+
+    odds = event.get(
+        "_odds",
+        {}
+    )
+
+    bookmakers = odds.get(
+        "bookmakers",
+        {}
+    )
+
+    all_options = {}
+
+    for bookmaker_name, markets in bookmakers.items():
+
+        if not isinstance(
+            markets,
+            list
+        ):
+            continue
+
+        for market in markets:
+
+            if market.get(
+                "name"
+            ) == "ML":
+
+                for item in market.get(
+                    "odds",
+                    []
+                ):
+
+                    for name in (
+                        "home",
+                        "draw",
+                        "away"
+                    ):
+
+                        if name not in item:
+                            continue
+
+                        price = item.get(
+                            name
+                        )
+
+                        if price is None:
+                            continue
+
+                        if name == "home":
+                            display_name = (
+                                event_home(event)
+                            )
+
+                        elif name == "away":
+                            display_name = (
+                                event_away(event)
+                            )
+
+                        else:
+                            display_name = "Draw"
+
+                        probability = (
+                            american_probability(
+                                price
+                            )
+                        )
+
+                        if (
+                            display_name
+                            not in all_options
+                            or probability >
+                            all_options[
+                                display_name
+                            ]["raw"]
+                        ):
+
+                            all_options[
+                                display_name
+                            ] = {
+                                "price": price,
+                                "raw": probability,
+                                "bookmaker":
+                                    bookmaker_name
+                            }
+
+    if not all_options:
         return None
+
+    total = sum(
+        item["raw"]
+        for item in
+        all_options.values()
+    )
+
+    if total <= 0:
+        return None
+
+    normalized = {}
+
+    for name, item in all_options.items():
+
+        normalized[name] = {
+            **item,
+            "probability":
+                item["raw"] / total
+        }
+
+    best_name = max(
+        normalized,
+        key=lambda name:
+            normalized[name][
+                "probability"
+            ]
+    )
+
+    best = normalized[
+        best_name
+    ]
+
+    return {
+        "outcomes": normalized,
+        "best_name": best_name,
+        "best_probability":
+            best["probability"],
+        "best_price":
+            best["price"],
+        "bookmaker":
+            best["bookmaker"]
+    }
+
+
+# =========================================================
+# SPREAD / TOTAL
+# =========================================================
+
+def get_market(
+    event,
+    market_name
+):
+
+    odds = event.get(
+        "_odds",
+        {}
+    )
+
+    bookmakers = odds.get(
+        "bookmakers",
+        {}
+    )
+
+    result = []
+
+    for bookmaker_name, markets in bookmakers.items():
+
+        if not isinstance(
+            markets,
+            list
+        ):
+            continue
+
+        for market in markets:
+
+            if market.get(
+                "name"
+            ) != market_name:
+
+                continue
+
+            for item in market.get(
+                "odds",
+                []
+            ):
+
+                result.append(
+                    {
+                        **item,
+                        "bookmaker":
+                            bookmaker_name
+                    }
+                )
+
+    return result
+
+
+# =========================================================
+# PROPS NBA
+# =========================================================
+
+def get_nba_props(event):
+
+    odds = event.get(
+        "_odds",
+        {}
+    )
+
+    bookmakers = odds.get(
+        "bookmakers",
+        {}
+    )
+
+    props = []
+
+    for bookmaker_name, markets in bookmakers.items():
+
+        if not isinstance(
+            markets,
+            list
+        ):
+            continue
+
+        for market in markets:
+
+            name = str(
+                market.get(
+                    "name",
+                    ""
+                )
+            ).lower()
+
+            # Intentamos identificar props
+            # de jugadores.
+            if "player" not in name:
+
+                continue
+
+            for item in market.get(
+                "odds",
+                []
+            ):
+
+                player = (
+                    item.get("player")
+                    or item.get("label")
+                    or item.get("description")
+                )
+
+                side = (
+                    item.get("side")
+                    or item.get("name")
+                    or ""
+                )
+
+                point = (
+                    item.get("point")
+                    or item.get("hdp")
+                )
+
+                price = item.get(
+                    "price"
+                )
+
+                if not player or price is None:
+                    continue
+
+                probability = (
+                    american_probability(
+                        price
+                    )
+                )
+
+                props.append(
+                    {
+                        "market":
+                            market.get(
+                                "name",
+                                "Player Prop"
+                            ),
+                        "player":
+                            player,
+                        "side":
+                            side,
+                        "point":
+                            point,
+                        "price":
+                            price,
+                        "probability":
+                            probability,
+                        "bookmaker":
+                            bookmaker_name
+                    }
+                )
+
+    return props
+
+
+# =========================================================
+# FORMATO
+# =========================================================
+
+def header(
+    emoji,
+    title
+):
+
+    return (
+        "╔══════════════════════════╗\n"
+        f"║ {emoji} {title:<20}║\n"
+        "╚══════════════════════════╝"
+    )
+
+
+def format_game(
+    event,
+    emoji,
+    title,
+    include_props=False
+):
+
+    home = event_home(
+        event
+    )
+
+    away = event_away(
+        event
+    )
+
+    h2h = get_h2h(
+        event
+    )
+
+    spread = get_market(
+        event,
+        "Spread"
+    )
+
+    total = get_market(
+        event,
+        "Totals"
+    )
+
+    odds = event.get(
+        "_odds",
+        {}
+    )
+
+    urls = odds.get(
+        "urls",
+        {}
+    )
+
+    lines = [
+        header(
+            emoji,
+            title
+        ),
+        "",
+        f"🏟️ {home}",
+        "        VS",
+        f"🏟️ {away}",
+        "",
+        f"📅 {date_text(event_date(event))}",
+        f"🕐 {time_text(event_date(event))}",
+        ""
+    ]
+
+    # =====================================================
+    # MONEYLINE
+    # =====================================================
+
+    if h2h:
+
+        lines.extend([
+            "💰 MONEYLINE",
+            ""
+        ])
+
+        for name, data in h2h[
+            "outcomes"
+        ].items():
+
+            lines.append(
+                f"{name:<22}"
+                f"{american(data['price'])}"
+            )
+
+        lines.extend([
+            "",
+            "📊 PROBABILIDAD"
+        ])
+
+        for name, data in h2h[
+            "outcomes"
+        ].items():
+
+            probability = data[
+                "probability"
+            ]
+
+            lines.append(
+                f"{name[:18]:<18} "
+                f"{bar(probability)} "
+                f"{probability:.1%}"
+            )
+
+        probability = h2h[
+            "best_probability"
+        ]
+
+        if probability >= 0.70:
+
+            risk = "🟢 BAJO"
+
+        elif probability >= 0.60:
+
+            risk = "🟡 MEDIO"
+
+        else:
+
+            risk = "🔴 ALTO"
+
+        lines.extend([
+            "",
+            "⚠️ RIESGO",
+            risk,
+            "",
+            "⭐ MEJOR OPCIÓN",
+            f"🔥 {h2h['best_name']} ML",
+            f"💵 Cuota: "
+            f"{american(h2h['best_price'])}",
+            f"📚 {h2h['bookmaker']}"
+        ])
+
+    # =====================================================
+    # SPREAD
+    # =====================================================
+
+    if spread:
+
+        lines.extend([
+            "",
+            "📈 SPREAD"
+        ])
+
+        for item in spread[:6]:
+
+            lines.append(
+                f"{item.get('home') or item.get('name', '')} "
+                f"{item.get('hdp', '')} "
+                f"{american(item.get('home_price', item.get('price', 0)))}"
+            )
+
+    # =====================================================
+    # TOTAL
+    # =====================================================
+
+    if total:
+
+        lines.extend([
+            "",
+            "🎯 TOTAL"
+        ])
+
+        for item in total[:6]:
+
+            lines.append(
+                f"{item.get('over', 'Over')} "
+                f"{item.get('hdp', item.get('point', ''))}"
+            )
+
+    # =====================================================
+    # NBA PROPS
+    # =====================================================
+
+    if include_props:
+
+        props = get_nba_props(
+            event
+        )
+
+        if props:
+
+            # Los mejores 10 por probabilidad.
+            props.sort(
+                key=lambda x:
+                    x["probability"],
+                reverse=True
+            )
+
+            lines.extend([
+                "",
+                "⭐ MEJORES PLAYER PROPS",
+                ""
+            ])
+
+            for prop in props[:10]:
+
+                lines.extend([
+                    f"👤 {prop['player']}",
+                    f"🏀 {prop['market']}",
+                    f"➡️ {prop['side']} "
+                    f"{prop['point']}",
+                    f"📊 Probabilidad: "
+                    f"{prop['probability']:.0%}",
+                    f"💵 Cuota: "
+                    f"{american(prop['price'])}",
+                    ""
+                ])
+
+    # =====================================================
+    # ENLACES
+    # =====================================================
+
+    if urls:
+
+        lines.extend([
+            "",
+            "🔗 APUESTAS"
+        ])
+
+        if urls.get(
+            "DraftKings"
+        ):
+
+            lines.append(
+                "🎯 DraftKings: "
+                + urls[
+                    "DraftKings"
+                ]
+            )
+
+        if urls.get(
+            "FanDuel"
+        ):
+
+            lines.append(
+                "🎯 FanDuel: "
+                + urls[
+                    "FanDuel"
+                ]
+            )
+
+    lines.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "📊 ValueEdge • Market Analysis"
+    ])
+
+    return "\n".join(
+        lines
+    )
+
+
+# =========================================================
+# ORDENAR
+# =========================================================
+
+def probability(event):
+
+    h2h = get_h2h(
+        event
+    )
+
+    if not h2h:
+        return 0
+
+    return h2h[
+        "best_probability"
+    ]
+
+
+def sort_best(events):
+
+    valid = []
+
+    for event in events:
+
+        p = probability(
+            event
+        )
+
+        if p > 0:
+
+            valid.append(
+                (
+                    p,
+                    event
+                )
+            )
+
+    valid.sort(
+        key=lambda x:
+            x[0],
+        reverse=True
+    )
+
+    return [
+        event
+        for _, event in valid
+    ]
+
+
+# =========================================================
+# GUARDAR PICK
+# =========================================================
+
+def save_pick(
+    event,
+    chat_id
+):
+
+    h2h = get_h2h(
+        event
+    )
+
+    if not h2h:
+        return
+
+    event_id = str(
+        event["id"]
+    )
+
+    pick = STATE[
+        "picks"
+    ].get(
+        event_id
+    )
+
+    if not pick:
+
+        pick = {
+            "id":
+                event["id"],
+
+            "sport_key":
+                event.get(
+                    "_sport_key",
+                    ""
+                ),
+
+            "home_team":
+                event_home(event),
+
+            "away_team":
+                event_away(event),
+
+            "outcome":
+                h2h[
+                    "best_name"
+                ],
+
+            "price":
+                h2h[
+                    "best_price"
+                ],
+
+            "probability":
+                h2h[
+                    "best_probability"
+                ],
+
+            "date":
+                event_date(event),
+
+            "sent_to":
+                [],
+
+            "settled":
+                False,
+
+            "won":
+                None,
+
+            "score":
+                None
+        }
+
+        STATE[
+            "picks"
+        ][event_id] = pick
+
+    if chat_id not in pick[
+        "sent_to"
+    ]:
+
+        pick[
+            "sent_to"
+        ].append(
+            chat_id
+        )
+
+    save_state()
+
+
+# =========================================================
+# MENSAJES
+# =========================================================
+
+def split_message(text):
+
+    if len(text) <= 3900:
+
+        return [
+            text
+        ]
+
+    chunks = []
+    current = ""
+
+    for line in text.splitlines(
+        keepends=True
+    ):
+
+        if (
+            len(current)
+            +
+            len(line)
+            > 3900
+        ):
+
+            if current:
+                chunks.append(
+                    current
+                )
+
+            current = line
+
+        else:
+
+            current += line
+
+    if current:
+
+        chunks.append(
+            current
+        )
+
+    return chunks
+
+
+async def send_text(
+    bot,
+    chat_id,
+    text
+):
+
+    for chunk in split_message(
+        text
+    ):
+
+        await bot.send_message(
+            chat_id=chat_id,
+            text=chunk
+        )
+
+
+# =========================================================
+# MANUAL MLB
+# =========================================================
+
+async def manual_mlb(
+    update,
+    context
+):
+
+    await update.message.reply_text(
+        "🔎 Buscando MLB de HOY + MAÑANA..."
+    )
+
+    events = await asyncio.to_thread(
+        get_mlb_events
+    )
+
+    events = await asyncio.to_thread(
+        attach_odds,
+        events
+    )
+
+    if not events:
+
+        await update.message.reply_text(
+            "❌ No hay partidos MLB "
+            "disponibles de HOY + MAÑANA."
+        )
+
+        return
+
+    events.sort(
+        key=lambda event:
+            event_date(event)
+    )
+
+    selected = events[
+        :max(
+            MANUAL_MIN,
+            len(events)
+        )
+    ]
+
+    await update.message.reply_text(
+        f"⚾ MLB\n"
+        f"📅 HOY + MAÑANA\n"
+        f"📊 {len(selected)} partidos"
+    )
+
+    chat_id = (
+        update.effective_chat.id
+    )
+
+    for event in selected:
+
+        save_pick(
+            event,
+            chat_id
+        )
+
+        text = await asyncio.to_thread(
+            format_game,
+            event,
+            "⚾",
+            "MLB",
+            False
+        )
+
+        await send_text(
+            context.bot,
+            chat_id,
+            text
+        )
+
+
+# =========================================================
+# MANUAL FUTBOL
+# =========================================================
+
+async def manual_soccer(
+    update,
+    context
+):
+
+    await update.message.reply_text(
+        "🔎 Buscando FÚTBOL de HOY + MAÑANA..."
+    )
+
+    events = await asyncio.to_thread(
+        get_soccer_events
+    )
+
+    events = await asyncio.to_thread(
+        attach_odds,
+        events
+    )
+
+    if not events:
+
+        await update.message.reply_text(
+            "❌ No hay partidos de fútbol "
+            "disponibles de HOY + MAÑANA."
+        )
+
+        return
+
+    events.sort(
+        key=lambda event:
+            event_date(event)
+    )
+
+    selected = events[
+        :max(
+            MANUAL_MIN,
+            len(events)
+        )
+    ]
+
+    await update.message.reply_text(
+        f"⚽ FÚTBOL\n"
+        f"📅 HOY + MAÑANA\n"
+        f"📊 {len(selected)} partidos"
+    )
+
+    chat_id = (
+        update.effective_chat.id
+    )
+
+    for event in selected:
+
+        save_pick(
+            event,
+            chat_id
+        )
+
+        title = event.get(
+            "_league",
+            "Fútbol"
+        )
+
+        text = await asyncio.to_thread(
+            format_game,
+            event,
+            "⚽",
+            title,
+            False
+        )
+
+        await send_text(
+            context.bot,
+            chat_id,
+            text
+        )
+
+
+# =========================================================
+# MANUAL NBA
+# =========================================================
+
+async def manual_nba(
+    update,
+    context
+):
+
+    await update.message.reply_text(
+        "🔎 Buscando NBA de HOY + MAÑANA..."
+    )
+
+    events = await asyncio.to_thread(
+        get_nba_events
+    )
+
+    events = await asyncio.to_thread(
+        attach_odds,
+        events
+    )
+
+    if not events:
+
+        await update.message.reply_text(
+            "❌ No hay partidos NBA "
+            "disponibles de HOY + MAÑANA."
+        )
+
+        return
+
+    events.sort(
+        key=lambda event:
+            event_date(event)
+    )
+
+    selected = events[
+        :max(
+            MANUAL_MIN,
+            len(events)
+        )
+    ]
+
+    await update.message.reply_text(
+        f"🏀 NBA\n"
+        f"📅 HOY + MAÑANA\n"
+        f"📊 {len(selected)} partidos"
+    )
+
+    chat_id = (
+        update.effective_chat.id
+    )
+
+    for event in selected:
+
+        save_pick(
+            event,
+            chat_id
+        )
+
+        text = await asyncio.to_thread(
+            format_game,
+            event,
+            "🏀",
+            "NBA",
+            True
+        )
+
+        await send_text(
+            context.bot,
+            chat_id,
+            text
+        )
+
+
+# =========================================================
+# BEST
+# =========================================================
+
+async def best(
+    update,
+    context
+):
+
+    await update.message.reply_text(
+        "🔥 Buscando las mejores oportunidades..."
+    )
+
+    mlb = await asyncio.to_thread(
+        get_mlb_events
+    )
+
+    soccer = await asyncio.to_thread(
+        get_soccer_events
+    )
+
+    nba = await asyncio.to_thread(
+        get_nba_events
+    )
+
+    all_events = (
+        mlb +
+        soccer +
+        nba
+    )
+
+    all_events = await asyncio.to_thread(
+        attach_odds,
+        all_events
+    )
+
+    mlb = [
+        e for e in all_events
+        if e.get("_sport_key")
+        == "baseball"
+    ]
+
+    soccer = [
+        e for e in all_events
+        if e.get("_sport_key")
+        == "football"
+    ]
+
+    nba = [
+        e for e in all_events
+        if e.get("_sport_key")
+        == "basketball"
+    ]
+
+    mlb = sort_best(
+        mlb
+    )[:AUTO_TOP]
+
+    soccer = sort_best(
+        soccer
+    )[:AUTO_TOP]
+
+    nba = sort_best(
+        nba
+    )[:AUTO_TOP]
+
+    groups = []
+
+    chat_id = (
+        update.effective_chat.id
+    )
+
+    for event in mlb:
+
+        save_pick(
+            event,
+            chat_id
+        )
+
+        groups.append(
+            await asyncio.to_thread(
+                format_game,
+                event,
+                "⚾",
+                "MLB",
+                False
+            )
+        )
+
+    for event in soccer:
+
+        save_pick(
+            event,
+            chat_id
+        )
+
+        groups.append(
+            await asyncio.to_thread(
+                format_game,
+                event,
+                "⚽",
+                event.get(
+                    "_league",
+                    "Fútbol"
+                ),
+                False
+            )
+        )
+
+    for event in nba:
+
+        save_pick(
+            event,
+            chat_id
+        )
+
+        groups.append(
+            await asyncio.to_thread(
+                format_game,
+                event,
+                "🏀",
+                "NBA",
+                True
+            )
+        )
+
+    if not groups:
+
+        await update.message.reply_text(
+            "❌ No encontré partidos "
+            "disponibles."
+        )
+
+        return
+
+    await send_text(
+        context.bot,
+        chat_id,
+        "\n\n".join(
+            groups
+        )
+    )
+
+
+# =========================================================
+# RESULTADOS
+# =========================================================
+
+def check_score(
+    event_id
+):
+
+    data = api_get(
+        f"events/{event_id}"
+    )
+
+    if not data:
+        return None
+
+    status = str(
+        data.get(
+            "status",
+            ""
+        )
+    ).lower()
+
+    # Odds-API.io utiliza estados como
+    # pending, live y settled.
+    if status not in {
+        "settled",
+        "finished",
+        "completed"
+    }:
+
+        return None
+
+    scores = data.get(
+        "scores"
+    )
+
+    if not scores:
+        return None
+
+    home = scores.get(
+        "home"
+    )
+
+    away = scores.get(
+        "away"
+    )
+
+    if home is None or away is None:
+
+        return None
+
+    return {
+        "home":
+            home,
+
+        "away":
+            away,
+
+        "status":
+            status
+    }
+
+
+def settle_result(
+    pick,
+    scores
+):
+
+    try:
+
+        home = float(
+            scores["home"]
+        )
+
+        away = float(
+            scores["away"]
+        )
+
+    except Exception:
+
+        return None
+
     if home > away:
-        winner = pick["home_team"]
+
+        winner = pick[
+            "home_team"
+        ]
+
     elif away > home:
-        winner = pick["away_team"]
+
+        winner = pick[
+            "away_team"
+        ]
+
     else:
+
         winner = "Draw"
-    won = pick["outcome"] == winner
-    return won, f"{int(home) if home.is_integer() else home} - {int(away) if away.is_integer() else away}"
+
+    won = (
+        pick["outcome"]
+        ==
+        winner
+    )
+
+    return (
+        won,
+        f"{int(home)} - {int(away)}"
+    )
 
 
-async def check_results(application):
-    pending = [pick for pick in STATE["picks"].values() if not pick.get("settled")]
+# =========================================================
+# RESULTADOS
+# =========================================================
+
+LAST_RESULTS_CHECK = None
+RESULTS_CHECK_MINUTES = 15
+MAX_RESULTS_PER_CHECK = 5
+
+
+async def check_results(
+    application
+):
+
+    global LAST_RESULTS_CHECK
+
+    current_time = now_ny()
+
+    # No revisar resultados cada minuto.
+    if LAST_RESULTS_CHECK is not None:
+
+        elapsed = (
+            current_time -
+            LAST_RESULTS_CHECK
+        ).total_seconds()
+
+        if elapsed < (
+            RESULTS_CHECK_MINUTES * 60
+        ):
+
+            return
+
+    LAST_RESULTS_CHECK = current_time
+
+    pending = [
+        pick
+        for pick in STATE[
+            "picks"
+        ].values()
+        if not pick.get(
+            "settled"
+        )
+    ]
+
+    if not pending:
+        return
+
+    # Solo revisamos unos pocos por ciclo
+    # para proteger el límite de la API.
+    pending = pending[
+        :MAX_RESULTS_PER_CHECK
+    ]
+
     for pick in pending:
-        try:
-            events = await asyncio.to_thread(api_get, f"{pick['sport_key']}/scores", {"daysFrom": 3})
-        except requests.RequestException as error:
-            print(f"No se pudo revisar resultado: {error}")
-            continue
-        event = next((item for item in events if item.get("id") == pick["id"] and item.get("completed")), None)
-        if not event:
-            continue
-        result = result_for_pick(pick, event)
+
+        result = await asyncio.to_thread(
+            check_score,
+            pick["id"]
+        )
+
         if not result:
             continue
-        won, score = result
-        status = "✅ GANADA" if won else "❌ PERDIDA"
-        message = f"{status}\n{pick['home_team']} vs {pick['away_team']}\nTu seleccion: {pick['outcome']}\nResultado: {score}"
-        for chat_id in pick.get("sent_to", []):
+
+        settled = settle_result(
+            pick,
+            result
+        )
+
+        if not settled:
+            continue
+
+        won, score = settled
+
+        status = (
+            "✅ GANADA"
+            if won
+            else
+            "❌ PERDIDA"
+        )
+
+        message = (
+            f"{status}\n\n"
+            f"🏟️ "
+            f"{pick['home_team']}\n"
+            f"        VS\n"
+            f"🏟️ "
+            f"{pick['away_team']}\n\n"
+            f"🎯 Tu selección: "
+            f"{pick['outcome']}\n"
+            f"📊 Resultado: "
+            f"{score}"
+        )
+
+        for chat_id in pick.get(
+            "sent_to",
+            []
+        ):
+
             try:
-                await application.bot.send_message(chat_id=chat_id, text=message)
+
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=message
+                )
+
             except Exception as error:
-                print(f"No se pudo enviar resultado a {chat_id}: {error}")
-        # Tras avisar el resultado, eliminamos el partido del historial activo.
-        # Asi el archivo no acumula recomendaciones ya terminadas.
-        STATE["picks"].pop(pick["id"], None)
-        save_state(STATE)
+
+                print(
+                    f"Error resultado: "
+                    f"{error}"
+                )
+
+        pick[
+            "settled"
+        ] = True
+
+        pick[
+            "won"
+        ] = won
+
+        pick[
+            "score"
+        ] = score
+
+        save_state()
+
+# =========================================================
+# AUTOMATICO 8 AM
+# =========================================================
+
+async def automatic_send(
+    application
+):
+
+    today = (
+        now_ny()
+        .date()
+        .isoformat()
+    )
+
+    if STATE.get(
+        "last_auto"
+    ) == today:
+
+        return
+
+    if not STATE[
+        "subscribers"
+    ]:
+
+        return
+
+    print(
+        "Preparando recomendaciones automáticas..."
+    )
+
+    mlb = await asyncio.to_thread(
+        get_mlb_events
+    )
+
+    soccer = await asyncio.to_thread(
+        get_soccer_events
+    )
+
+    nba = await asyncio.to_thread(
+        get_nba_events
+    )
+
+    all_events = (
+        mlb +
+        soccer +
+        nba
+    )
+
+    all_events = await asyncio.to_thread(
+        attach_odds,
+        all_events
+    )
+
+    mlb = [
+        e for e in all_events
+        if e.get("_sport_key")
+        == "baseball"
+    ]
+
+    soccer = [
+        e for e in all_events
+        if e.get("_sport_key")
+        == "football"
+    ]
+
+    nba = [
+        e for e in all_events
+        if e.get("_sport_key")
+        == "basketball"
+    ]
+
+    mlb = sort_best(
+        mlb
+    )[:AUTO_TOP]
+
+    soccer = sort_best(
+        soccer
+    )[:AUTO_TOP]
+
+    nba = sort_best(
+        nba
+    )[:AUTO_TOP]
+
+    sections = []
+
+    for chat_id in STATE[
+        "subscribers"
+    ]:
+
+        parts = []
+
+        if mlb:
+
+            mlb_text = []
+
+            for event in mlb:
+
+                save_pick(
+                    event,
+                    chat_id
+                )
+
+                mlb_text.append(
+                    await asyncio.to_thread(
+                        format_game,
+                        event,
+                        "⚾",
+                        "MLB",
+                        False
+                    )
+                )
+
+            parts.append(
+                "🔥 TOP 5 MLB\n\n"
+                +
+                "\n\n".join(
+                    mlb_text
+                )
+            )
+
+        if soccer:
+
+            soccer_text = []
+
+            for event in soccer:
+
+                save_pick(
+                    event,
+                    chat_id
+                )
+
+                soccer_text.append(
+                    await asyncio.to_thread(
+                        format_game,
+                        event,
+                        "⚽",
+                        event.get(
+                            "_league",
+                            "Fútbol"
+                        ),
+                        False
+                    )
+                )
+
+            parts.append(
+                "🔥 TOP 5 FÚTBOL\n\n"
+                +
+                "\n\n".join(
+                    soccer_text
+                )
+            )
+
+        if nba:
+
+            nba_text = []
+
+            for event in nba:
+
+                save_pick(
+                    event,
+                    chat_id
+                )
+
+                nba_text.append(
+                    await asyncio.to_thread(
+                        format_game,
+                        event,
+                        "🏀",
+                        "NBA",
+                        True
+                    )
+                )
+
+            parts.append(
+                "🔥 TOP 5 NBA\n\n"
+                +
+                "\n\n".join(
+                    nba_text
+                )
+            )
+
+        if parts:
+
+            final = "\n\n".join(
+                parts
+            )
+
+            try:
+
+                await send_text(
+                    application.bot,
+                    chat_id,
+                    final
+                )
+
+            except Exception as error:
+
+                print(
+                    f"Error automático: "
+                    f"{error}"
+                )
+
+    STATE[
+        "last_auto"
+    ] = today
+
+    save_state()
 
 
-async def scan_loop(application):
-    last_result_check = None
+# =========================================================
+# SCHEDULER
+# =========================================================
+
+async def scheduler(
+    application
+):
+
+    print(
+        "Programación automática: "
+        "8:00 AM America/New_York"
+    )
+
     while True:
+
         try:
-            now = datetime.now(BOT_TIMEZONE)
-            if last_result_check is None or (now - last_result_check).total_seconds() >= RESULT_CHECK_INTERVAL_SECONDS:
-                await check_results(application)
-                last_result_check = now
-            today = now.date().isoformat()
-            if now.hour == 8 and now.minute == 0 and STATE.get("last_daily_scan") != today and STATE["subscribers"]:
-                await send_new_picks(application)
-                STATE["last_daily_scan"] = today
-                save_state(STATE)
+
+            await check_results(
+                application
+            )
+
+            current = now_ny()
+
+            if (
+                current.hour >
+                AUTO_HOUR
+                or
+                (
+                    current.hour ==
+                    AUTO_HOUR
+                    and
+                    current.minute >=
+                    AUTO_MINUTE
+                )
+            ):
+
+                await automatic_send(
+                    application
+                )
+
         except Exception as error:
-            print(f"Error en automatizacion: {error}")
-        await asyncio.sleep(SCHEDULER_TICK_SECONDS)
+
+            print(
+                f"Error scheduler: "
+                f"{error}"
+            )
+
+        await asyncio.sleep(
+            60
+        )
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id not in STATE["subscribers"]:
-        STATE["subscribers"].append(chat_id)
-        save_state(STATE)
+# =========================================================
+# START
+# =========================================================
+
+async def start(
+    update,
+    context
+):
+
+    chat_id = (
+        update.effective_chat.id
+    )
+
+    if chat_id not in STATE[
+        "subscribers"
+    ]:
+
+        STATE[
+            "subscribers"
+        ].append(
+            chat_id
+        )
+
+        save_state()
+
     await update.message.reply_text(
-        "ValueEdgeBot activado. Revisare Futbol y MLB automaticamente.\n\n"
-        "Comandos:\n/best - mejores oportunidades ahora\n/futbol - ver Futbol\n/mlb - ver MLB"
+        "🤖 ValueEdgeBot activado.\n\n"
+        "🕗 Automático: 8:00 AM NY\n"
+        "📅 Partidos: HOY + MAÑANA\n"
+        "📚 DraftKings + FanDuel\n\n"
+        "⚾ /mlb\n"
+        "⚽ /futbol\n"
+        "🏀 /nba\n"
+        "🔥 /best"
     )
 
 
-async def show_picks(update: Update, sport_keys=None, show_all=False):
-    await update.message.reply_text("Buscando las mejores oportunidades...")
-    if show_all:
-        events = await asyncio.to_thread(get_analyzed_events, sport_keys)
-        if not events:
-            await update.message.reply_text("No hay partidos de hoy con cuotas disponibles para analizar.")
-            return
-        opportunities = sum(event["is_opportunity"] for event in events)
-        if opportunities:
-            summary = f"Hay {opportunities} oportunidad(es) y {len(events) - opportunities} partido(s) en seguimiento."
-        else:
-            summary = "No hay oportunidades que cumplan el filtro ahora, pero estos son los partidos disponibles para analizar."
-        await update.message.reply_text(summary)
-        for event in events:
-            await update.message.reply_text(analysis_message(event))
-        return
-    picks = await asyncio.to_thread(get_candidates, sport_keys)
-    if not picks:
-        await update.message.reply_text("No hay oportunidades que cumplan el filtro ahora.")
-        return
-    for pick in picks[:MAX_PICKS_PER_SCAN]:
-        await update.message.reply_text(pick_message(pick))
+# =========================================================
+# POST INIT
+# =========================================================
+
+async def post_init(
+    application
+):
+
+    application.bot_data[
+        "scheduler"
+    ] = asyncio.create_task(
+        scheduler(
+            application
+        )
+    )
+
+    print(
+        "================================"
+    )
+
+    print(
+        "ValueEdgeBot iniciado"
+    )
+
+    print(
+        "Odds-API.io"
+    )
+
+    print(
+        "MLB + Fútbol + NBA"
+    )
+
+    print(
+        "DraftKings + FanDuel"
+    )
+
+    print(
+        "Partidos: HOY + MAÑANA"
+    )
+
+    print(
+        "Automático: 8:00 AM NY"
+    )
+
+    print(
+        "================================"
+    )
 
 
-async def best(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_picks(update)
+# =========================================================
+# POST SHUTDOWN
+# =========================================================
 
+async def post_shutdown(
+    application
+):
 
-async def futbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_picks(update, [key for key in SPORTS if key.startswith("soccer_")], show_all=True)
+    task = application.bot_data.get(
+        "scheduler"
+    )
 
-
-async def mlb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_picks(update, ["baseball_mlb"], show_all=True)
-
-
-async def post_init(application):
-    # post_init ocurre antes de que PTB marque la aplicacion como "running".
-    # asyncio.create_task evita la advertencia de PTB y guardamos la tarea para cerrarla bien.
-    application.bot_data["scan_task"] = asyncio.create_task(scan_loop(application))
-    print("Recomendaciones: todos los dias a las 8:00 a. m. (hora de Nueva York).")
-    print("Resultados pendientes: cada 10 minutos.")
-
-
-async def post_shutdown(application):
-    task = application.bot_data.get("scan_task")
     if task:
+
         task.cancel()
+
         try:
+
             await task
+
         except asyncio.CancelledError:
+
             pass
 
 
-app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("best", best))
-app.add_handler(CommandHandler("futbol", futbol))
-app.add_handler(CommandHandler("mlb", mlb))
+# =========================================================
+# TELEGRAM
+# =========================================================
 
-print("ValueEdgeBot iniciado: Futbol + MLB")
+app = (
+    Application
+    .builder()
+    .token(
+        BOT_TOKEN
+    )
+    .post_init(
+        post_init
+    )
+    .post_shutdown(
+        post_shutdown
+    )
+    .build()
+)
+
+
+app.add_handler(
+    CommandHandler(
+        "start",
+        start
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "best",
+        best
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "mlb",
+        manual_mlb
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "futbol",
+        manual_soccer
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "nba",
+        manual_nba
+    )
+)
+
+
+# =========================================================
+# INICIAR
+# =========================================================
+
+print(
+    "Iniciando ValueEdgeBot..."
+)
+
 app.run_polling()
