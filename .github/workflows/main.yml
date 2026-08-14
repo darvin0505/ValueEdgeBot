@@ -1,9 +1,16 @@
 name: ValueEdgeBot
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
   schedule:
     - cron: "0 12 * * *"
+
+concurrency:
+  group: valueedgebot-production
+  cancel-in-progress: true
 
 jobs:
   run-bot:
@@ -19,8 +26,7 @@ jobs:
           python-version: "3.11"
 
       - name: Instalar dependencias
-        run: |
-          pip install requests python-dotenv python-telegram-bot
+        run: pip install -r requirements.txt
 
       - name: Ejecutar ValueEdgeBot
         env:
