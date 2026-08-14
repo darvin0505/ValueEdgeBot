@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
+from valueedge_analysis import analyze_mlb_props, display_odds, implied_probability
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -28,13 +29,18 @@ ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 BASE_URL = "https://api.odds-api.io/v3"
 NY_TZ = ZoneInfo("America/New_York")
 
-STATE_FILE = "valueedge_state.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATE_FILE = os.path.join(BASE_DIR, "valueedge_state.json")
 
 AUTO_HOUR = 8
 AUTO_MINUTE = 0
 
 AUTO_TOP = 5
 MANUAL_MIN = 7
+MANUAL_MAX = 10
+MIN_TWO_WAY_PROBABILITY = 0.54
+MIN_THREE_WAY_PROBABILITY = 0.42
+MIN_LEAD_OVER_SECOND = 0.035
 
 BOOKMAKERS = "DraftKings,FanDuel"
 
@@ -45,13 +51,15 @@ BOOKMAKERS = "DraftKings,FanDuel"
 
 SOCCER_LEAGUES = {
     "england-premier-league": "Premier League",
-    "spain-la-liga": "La Liga",
+    "spain-laliga": "La Liga",
     "italy-serie-a": "Serie A",
     "germany-bundesliga": "Bundesliga",
     "france-ligue-1": "Ligue 1",
     "usa-mls": "MLS",
-    "uefa-champions-league": "Champions League",
-    "uefa-europa-league": "Europa League",
+    "international-clubs-uefa-champions-league-playoff-round":
+        "Champions League",
+    "international-clubs-uefa-europa-league-playoff-round":
+        "Europa League",
 }
 
 
@@ -277,7 +285,7 @@ def get_events(
         "sport": sport,
         "status": "pending",
         "limit": limit,
-        "bookmaker": "DraftKings"
+
     }
 
     if league:
@@ -305,8 +313,8 @@ def get_soccer_events():
     for league_slug, league_name in SOCCER_LEAGUES.items():
 
         events = get_events(
-            "football",
-            league_slug,
+           "football",
+           league_slug,
             100
         )
 
@@ -329,7 +337,7 @@ def get_mlb_events():
 
     events = get_events(
         "baseball",
-        None,
+        "usa-mlb",
         100
     )
 
@@ -347,9 +355,11 @@ def get_nba_events():
 
     events = get_events(
         "basketball",
-        None,
+        "usa-nba",
         100
     )
+
+    result = []
 
     for event in events:
 
@@ -358,8 +368,9 @@ def get_nba_events():
             "basketball"
         )
 
-    return events
+        result.append(event)
 
+    return result
 
 # =========================================================
 # ODDS
@@ -445,40 +456,11 @@ def attach_odds(events):
 # =========================================================
 
 def american_probability(price):
-
-    try:
-
-        price = float(price)
-
-    except Exception:
-
-        return 0
-
-    if price > 0:
-
-        return 100 / (
-            price + 100
-        )
-
-    return abs(price) / (
-        abs(price) + 100
-    )
+    return implied_probability(price)
 
 
 def american(price):
-
-    try:
-
-        price = float(price)
-
-        if price > 0:
-            return f"+{int(price)}"
-
-        return str(int(price))
-
-    except Exception:
-
-        return str(price)
+    return display_odds(price)
 
 
 def bar(probability):
@@ -729,6 +711,87 @@ def get_market(
                 )
 
     return result
+
+
+def get_market_fuzzy(event, terms):
+
+    odds = event.get("_odds", {})
+    bookmakers = odds.get("bookmakers", {})
+    result = []
+
+    for bookmaker_name, markets in bookmakers.items():
+
+        if not isinstance(markets, list):
+            continue
+
+        for market in markets:
+
+            market_name = str(market.get("name", "")).lower()
+
+            if not any(term in market_name for term in terms):
+                continue
+
+            for item in market.get("odds", []):
+                result.append({**item, "bookmaker": bookmaker_name, "market_name": market.get("name", "")})
+
+    return result
+
+
+def soccer_specials(event):
+
+    lines = []
+    # Solo partido completo: excluye Totals HT/2H y BTTS HT/2H.
+    totals = get_market(event, "Totals")
+    btts = get_market(event, "Both Teams To Score")
+
+    total_choices = []
+    for item in totals:
+        point = item.get("hdp", item.get("point", item.get("line", "")))
+        over_price = item.get("over_price", item.get("over"))
+        under_price = item.get("under_price", item.get("under"))
+        if over_price is not None and under_price is not None:
+            over_p, under_p = american_probability(over_price), american_probability(under_price)
+            total = over_p + under_p
+            if total > 0:
+                total_choices.extend([
+                    (over_p / total, f"Over {point}", over_price, item["bookmaker"]),
+                    (under_p / total, f"Under {point}", under_price, item["bookmaker"]),
+                ])
+
+    if total_choices:
+        probability_value, choice, price, book = max(total_choices, key=lambda row: row[0])
+        lines.extend([
+            "⚽ OVER / UNDER",
+            f"🎯 {choice}",
+            f"📊 Probabilidad: {probability_value:.1%}",
+            f"💵 {american(price)} · {book}",
+            ""
+        ])
+
+    btts_choices = []
+    for item in btts:
+        yes_price = item.get("yes", item.get("yes_price"))
+        no_price = item.get("no", item.get("no_price"))
+        if yes_price is not None and no_price is not None:
+            yes_p, no_p = american_probability(yes_price), american_probability(no_price)
+            total = yes_p + no_p
+            if total > 0:
+                btts_choices.extend([
+                    (yes_p / total, "Sí", yes_price, item["bookmaker"]),
+                    (no_p / total, "No", no_price, item["bookmaker"]),
+                ])
+
+    if btts_choices:
+        probability_value, choice, price, book = max(btts_choices, key=lambda row: row[0])
+        lines.extend([
+            "🥅 AMBOS MARCAN",
+            f"🎯 {choice}",
+            f"📊 Probabilidad: {probability_value:.1%}",
+            f"💵 {american(price)} · {book}",
+            ""
+        ])
+
+    return lines
 
 
 # =========================================================
@@ -992,7 +1055,7 @@ def format_game(
     # TOTAL
     # =====================================================
 
-    if total:
+    if total and event.get("_sport_key") != "football":
 
         lines.extend([
             "",
@@ -1005,6 +1068,13 @@ def format_game(
                 f"{item.get('over', 'Over')} "
                 f"{item.get('hdp', item.get('point', ''))}"
             )
+
+    # Fútbol: Over/Under siempre que haya una línea, y BTTS solo si la API
+    # realmente lo entrega. El análisis nunca depende de BTTS.
+    if event.get("_sport_key") == "football":
+        special_lines = soccer_specials(event)
+        if special_lines:
+            lines.extend([""] + special_lines)
 
     # =====================================================
     # NBA PROPS
@@ -1117,7 +1187,16 @@ def sort_best(events):
             event
         )
 
-        if p > 0:
+        h2h = get_h2h(event)
+        outcomes = sorted(
+            (item["probability"] for item in h2h["outcomes"].values()),
+            reverse=True
+        ) if h2h else []
+        minimum = MIN_THREE_WAY_PROBABILITY if len(outcomes) >= 3 else MIN_TWO_WAY_PROBABILITY
+        lead = outcomes[0] - outcomes[1] if len(outcomes) >= 2 else 0
+
+        # Un favorito apenas por encima del segundo no es una ventaja util.
+        if p >= minimum and lead >= MIN_LEAD_OVER_SECOND:
 
             valid.append(
                 (
@@ -1328,12 +1407,7 @@ async def manual_mlb(
             event_date(event)
     )
 
-    selected = events[
-        :max(
-            MANUAL_MIN,
-            len(events)
-        )
-    ]
+    selected = events[:max(MANUAL_MIN, min(MANUAL_MAX, len(events)))]
 
     await update.message.reply_text(
         f"⚾ MLB\n"
@@ -1403,12 +1477,7 @@ async def manual_soccer(
             event_date(event)
     )
 
-    selected = events[
-        :max(
-            MANUAL_MIN,
-            len(events)
-        )
-    ]
+    selected = events[:max(MANUAL_MIN, min(MANUAL_MAX, len(events)))]
 
     await update.message.reply_text(
         f"⚽ FÚTBOL\n"
@@ -1483,12 +1552,7 @@ async def manual_nba(
             event_date(event)
     )
 
-    selected = events[
-        :max(
-            MANUAL_MIN,
-            len(events)
-        )
-    ]
+    selected = events[:max(MANUAL_MIN, min(MANUAL_MAX, len(events)))]
 
     await update.message.reply_text(
         f"🏀 NBA\n"
@@ -1520,6 +1584,71 @@ async def manual_nba(
             chat_id,
             text
         )
+
+
+# =========================================================
+# PARLAY MLB - PROPS DE JUGADORES
+# =========================================================
+
+def format_parlay(props):
+
+    lines = [
+        "⚾ TOP PROPS MLB PARA /PARLAY",
+        "",
+        "Statcast + línea real de DraftKings/FanDuel",
+        "Solo aparecen selecciones que superan los filtros.",
+        ""
+    ]
+
+    for position, prop in enumerate(props, 1):
+
+        line = int(prop["line"]) if float(prop["line"]).is_integer() else prop["line"]
+
+        lines.extend([
+            f"{position}. 👤 {prop['player']}",
+            f"   🧢 {prop['team']} vs {prop['opponent']}",
+            f"   🎯 {prop['side']} {line} {prop['market']}",
+            f"   📊 Probabilidad estimada: {prop['probability']:.1%}",
+            f"   ⭐ Score ValueEdge: {prop['score']:.1f}/100",
+            f"   💵 {american(prop['price'])} · {prop['bookmaker']}",
+            "   ⏳ Alineación por confirmar" if prop.get("lineup_confirmed") is False else "   ✅ Alineación confirmada",
+            ""
+        ])
+
+    lines.extend([
+        "No es necesario combinar todas las selecciones.",
+        "ValueEdge no rellena la lista con props débiles."
+    ])
+
+    return "\n".join(lines)
+
+
+async def parlay(update, context):
+
+    await update.message.reply_text(
+        "🔎 Analizando props MLB con Statcast y líneas disponibles..."
+    )
+
+    events = await asyncio.to_thread(get_mlb_events)
+    events = await asyncio.to_thread(attach_odds, events)
+
+    if not events:
+        await update.message.reply_text(
+            "❌ No hay juegos MLB con líneas disponibles para hoy o mañana."
+        )
+        return
+
+    props = await asyncio.to_thread(analyze_mlb_props, events)
+
+    if not props:
+        await update.message.reply_text(
+            "⚠️ Hoy no encontré props MLB que superen los filtros de calidad.\n\n"
+            "No voy a rellenar el parlay con picks débiles. Revisa de nuevo cuando "
+            "las alineaciones y líneas de jugadores estén publicadas."
+        )
+        return
+
+    await send_text(context.bot, update.effective_chat.id, format_parlay(props))
 
 
 # =========================================================
@@ -1793,7 +1922,7 @@ async def check_results(
 
     current_time = now_ny()
 
-    # No revisar resultados cada minuto.
+    # Revisar resultados como máximo cada 10 minutos.
     if LAST_RESULTS_CHECK is not None:
 
         elapsed = (
@@ -1801,10 +1930,7 @@ async def check_results(
             LAST_RESULTS_CHECK
         ).total_seconds()
 
-        if elapsed < (
-            RESULTS_CHECK_MINUTES * 60
-        ):
-
+        if elapsed < 600:
             return
 
     LAST_RESULTS_CHECK = current_time
@@ -1814,25 +1940,38 @@ async def check_results(
         for pick in STATE[
             "picks"
         ].values()
-        if not pick.get(
-            "settled"
-        )
+        if not pick.get("settled")
     ]
 
     if not pending:
         return
 
-    # Solo revisamos unos pocos por ciclo
-    # para proteger el límite de la API.
-    pending = pending[
-        :MAX_RESULTS_PER_CHECK
-    ]
+    # Solo revisar hasta 3 partidos por ciclo.
+    pending = pending[:3]
 
     for pick in pending:
 
+        event_id = str(
+            pick.get("id", "")
+        )
+
+        # Odds-API.io usa IDs numéricos.
+        # Evitamos consultar IDs antiguos/inválidos.
+        if not event_id.isdigit():
+            print(
+                f"Saltando ID inválido: {event_id}"
+            )
+
+            pick["settled"] = True
+            pick["won"] = None
+            pick["score"] = "ID inválido"
+
+            save_state()
+            continue
+
         result = await asyncio.to_thread(
             check_score,
-            pick["id"]
+            int(event_id)
         )
 
         if not result:
@@ -1887,17 +2026,9 @@ async def check_results(
                     f"{error}"
                 )
 
-        pick[
-            "settled"
-        ] = True
-
-        pick[
-            "won"
-        ] = won
-
-        pick[
-            "score"
-        ] = score
+        pick["settled"] = True
+        pick["won"] = won
+        pick["score"] = score
 
         save_state()
 
@@ -1984,7 +2115,7 @@ async def automatic_send(
         nba
     )[:AUTO_TOP]
 
-    sections = []
+    delivered = False
 
     for chat_id in STATE[
         "subscribers"
@@ -2096,6 +2227,8 @@ async def automatic_send(
                     final
                 )
 
+                delivered = True
+
             except Exception as error:
 
                 print(
@@ -2103,11 +2236,11 @@ async def automatic_send(
                     f"{error}"
                 )
 
-    STATE[
-        "last_auto"
-    ] = today
-
-    save_state()
+    # Si la API no devolvió picks o falló el envío, el scheduler puede
+    # reintentarlo en el próximo ciclo en vez de perder todo el día.
+    if delivered:
+        STATE["last_auto"] = today
+        save_state()
 
 
 # =========================================================
@@ -2195,6 +2328,7 @@ async def start(
         "⚾ /mlb\n"
         "⚽ /futbol\n"
         "🏀 /nba\n"
+        "🧩 /parlay (props MLB)\n"
         "🔥 /best"
     )
 
@@ -2328,13 +2462,22 @@ app.add_handler(
     )
 )
 
+app.add_handler(
+    CommandHandler(
+        "parlay",
+        parlay
+    )
+)
+
 
 # =========================================================
 # INICIAR
 # =========================================================
 
-print(
-    "Iniciando ValueEdgeBot..."
-)
+if __name__ == "__main__":
 
-app.run_polling()
+    print(
+        "Iniciando ValueEdgeBot..."
+    )
+
+    app.run_polling()
