@@ -7,6 +7,12 @@ from zoneinfo import ZoneInfo
 import requests
 from dotenv import load_dotenv
 from valueedge_analysis import analyze_mlb_props, display_odds, implied_probability
+from api_sports_analysis import (
+    agreement_text,
+    confidence_adjustment,
+    enrich_events,
+    source_text,
+)
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -25,6 +31,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 BASE_URL = "https://api.odds-api.io/v3"
 NY_TZ = ZoneInfo("America/New_York")
@@ -76,8 +83,15 @@ if not ODDS_API_KEY:
 
 def load_state():
 
+    default_subscribers = []
+    if TELEGRAM_CHAT_ID:
+        try:
+            default_subscribers = [int(TELEGRAM_CHAT_ID)]
+        except ValueError:
+            print("TELEGRAM_CHAT_ID inválido")
+
     default = {
-        "subscribers": [],
+        "subscribers": default_subscribers,
         "picks": {},
         "last_auto": None
     }
@@ -97,8 +111,12 @@ def load_state():
 
         state.setdefault(
             "subscribers",
-            []
+            default_subscribers
         )
+
+        for chat_id in default_subscribers:
+            if chat_id not in state["subscribers"]:
+                state["subscribers"].append(chat_id)
 
         state.setdefault(
             "picks",
@@ -1172,9 +1190,62 @@ def probability(event):
     if not h2h:
         return 0
 
-    return h2h[
-        "best_probability"
+    adjusted = h2h["best_probability"] + confidence_adjustment(
+        event,
+        h2h["best_name"]
+    )
+    return max(0.01, min(0.99, adjusted))
+
+
+def format_pick_card(event, emoji, title, include_props=False):
+
+    h2h = get_h2h(event)
+    if not h2h:
+        return None
+
+    selected = h2h["best_name"]
+    estimated = probability(event)
+
+    if estimated >= 0.72:
+        confidence = "🟢 ALTA"
+    elif estimated >= 0.60:
+        confidence = "🟡 MEDIA"
+    else:
+        confidence = "🟠 MODERADA"
+
+    lines = [
+        f"{emoji} {title}",
+        f"{event_away(event)} @ {event_home(event)}",
+        f"📅 {date_text(event_date(event))} · {time_text(event_date(event))}",
+        "",
+        f"🎯 Pick: {selected} ML",
+        f"💵 Cuota: {american(h2h['best_price'])} · {h2h['bookmaker']}",
+        f"📊 Probabilidad estimada: {estimated:.1%}",
+        f"🛡 Confianza: {confidence}",
+        f"🔎 {agreement_text(event, selected)}",
+        f"📚 Fuentes: {source_text(event)}",
+        f"🧪 {performance_text()}",
     ]
+
+    if event.get("_sport_key") == "football":
+        specials = soccer_specials(event)
+        if specials:
+            lines.extend(["", *specials])
+
+    lines.extend(["", "ValueEdge · análisis, no garantía"])
+    return "\n".join(lines)
+
+
+def performance_text():
+
+    settled = [
+        pick for pick in STATE.get("picks", {}).values()
+        if pick.get("settled") and isinstance(pick.get("won"), bool)
+    ]
+    if len(settled) < 10:
+        return f"Historial en calibración ({len(settled)}/10 resultados)"
+    won = sum(1 for pick in settled if pick.get("won"))
+    return f"Acierto histórico verificado: {won / len(settled):.1%} ({len(settled)} picks)"
 
 
 def sort_best(events):
@@ -1272,9 +1343,10 @@ def save_pick(
                 ],
 
             "probability":
-                h2h[
-                    "best_probability"
-                ],
+                probability(event),
+
+            "model_version":
+                "valueedge-2-api-sports",
 
             "date":
                 event_date(event),
@@ -1393,6 +1465,8 @@ async def manual_mlb(
         events
     )
 
+    events = await asyncio.to_thread(enrich_events, events, "baseball")
+
     if not events:
 
         await update.message.reply_text(
@@ -1427,12 +1501,15 @@ async def manual_mlb(
         )
 
         text = await asyncio.to_thread(
-            format_game,
+            format_pick_card,
             event,
             "⚾",
             "MLB",
             False
         )
+
+        if not text:
+            continue
 
         await send_text(
             context.bot,
@@ -1462,6 +1539,8 @@ async def manual_soccer(
         attach_odds,
         events
     )
+
+    events = await asyncio.to_thread(enrich_events, events, "football")
 
     if not events:
 
@@ -1502,12 +1581,15 @@ async def manual_soccer(
         )
 
         text = await asyncio.to_thread(
-            format_game,
+            format_pick_card,
             event,
             "⚽",
             title,
             False
         )
+
+        if not text:
+            continue
 
         await send_text(
             context.bot,
@@ -1537,6 +1619,8 @@ async def manual_nba(
         attach_odds,
         events
     )
+
+    events = await asyncio.to_thread(enrich_events, events, "basketball")
 
     if not events:
 
@@ -1572,12 +1656,15 @@ async def manual_nba(
         )
 
         text = await asyncio.to_thread(
-            format_game,
+            format_pick_card,
             event,
             "🏀",
             "NBA",
             True
         )
+
+        if not text:
+            continue
 
         await send_text(
             context.bot,
@@ -1705,6 +1792,10 @@ async def best(
         == "basketball"
     ]
 
+    mlb = await asyncio.to_thread(enrich_events, mlb, "baseball")
+    soccer = await asyncio.to_thread(enrich_events, soccer, "football")
+    nba = await asyncio.to_thread(enrich_events, nba, "basketball")
+
     mlb = sort_best(
         mlb
     )[:AUTO_TOP]
@@ -1732,7 +1823,7 @@ async def best(
 
         groups.append(
             await asyncio.to_thread(
-                format_game,
+                format_pick_card,
                 event,
                 "⚾",
                 "MLB",
@@ -1749,7 +1840,7 @@ async def best(
 
         groups.append(
             await asyncio.to_thread(
-                format_game,
+                format_pick_card,
                 event,
                 "⚽",
                 event.get(
@@ -1769,7 +1860,7 @@ async def best(
 
         groups.append(
             await asyncio.to_thread(
-                format_game,
+                format_pick_card,
                 event,
                 "🏀",
                 "NBA",
@@ -2103,6 +2194,10 @@ async def automatic_send(
         == "basketball"
     ]
 
+    mlb = await asyncio.to_thread(enrich_events, mlb, "baseball")
+    soccer = await asyncio.to_thread(enrich_events, soccer, "football")
+    nba = await asyncio.to_thread(enrich_events, nba, "basketball")
+
     mlb = sort_best(
         mlb
     )[:AUTO_TOP]
@@ -2136,7 +2231,7 @@ async def automatic_send(
 
                 mlb_text.append(
                     await asyncio.to_thread(
-                        format_game,
+                        format_pick_card,
                         event,
                         "⚾",
                         "MLB",
@@ -2165,7 +2260,7 @@ async def automatic_send(
 
                 soccer_text.append(
                     await asyncio.to_thread(
-                        format_game,
+                        format_pick_card,
                         event,
                         "⚽",
                         event.get(
@@ -2197,7 +2292,7 @@ async def automatic_send(
 
                 nba_text.append(
                     await asyncio.to_thread(
-                        format_game,
+                        format_pick_card,
                         event,
                         "🏀",
                         "NBA",
@@ -2214,18 +2309,11 @@ async def automatic_send(
             )
 
         if parts:
-
-            final = "\n\n".join(
-                parts
-            )
-
             try:
 
-                await send_text(
-                    application.bot,
-                    chat_id,
-                    final
-                )
+                # Un mensaje separado por deporte: más fácil de leer y guardar.
+                for part in parts:
+                    await send_text(application.bot, chat_id, part)
 
                 delivered = True
 
