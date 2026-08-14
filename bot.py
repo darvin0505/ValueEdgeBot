@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -200,7 +200,22 @@ def valid_event_date(event):
 
     today = now_ny().date()
 
-    return dt.date() == today
+    tomorrow = today + timedelta(days=1)
+    return dt.date() in (today, tomorrow)
+
+
+def day_label(iso):
+
+    dt = local_datetime(iso)
+    if not dt:
+        return "FECHA"
+
+    today = now_ny().date()
+    if dt.date() == today:
+        return "HOY"
+    if dt.date() == today + timedelta(days=1):
+        return "MAÑANA"
+    return "FECHA"
 
 
 def date_text(iso):
@@ -1210,7 +1225,7 @@ def format_pick_card(event, emoji, title, include_props=False):
     lines = [
         f"{emoji} {title}",
         f"{event_away(event)} vs {event_home(event)}",
-        f"📅 {date_text(event_date(event))} · {time_text(event_date(event))}",
+        f"📅 {day_label(event_date(event))} · {date_text(event_date(event))} · {time_text(event_date(event))}",
         "",
         f"🎯 Pick: {selected} ML",
         f"💵 Cuota: {american(h2h['best_price'])} · {h2h['bookmaker']}",
@@ -1447,7 +1462,7 @@ async def manual_mlb(
 ):
 
     await update.message.reply_text(
-        "🔎 Buscando MLB de HOY..."
+        "🔎 Buscando MLB de HOY Y MAÑANA..."
     )
 
     events = await asyncio.to_thread(
@@ -1465,7 +1480,7 @@ async def manual_mlb(
 
         await update.message.reply_text(
             "❌ No hay partidos MLB "
-            "disponibles para HOY."
+            "disponibles para HOY Y MAÑANA."
         )
 
         return
@@ -1479,7 +1494,7 @@ async def manual_mlb(
 
     await update.message.reply_text(
         f"⚾ MLB\n"
-        f"📅 HOY\n"
+        f"📅 HOY Y MAÑANA · hoy aparece primero\n"
         f"📊 {len(selected)} partidos"
     )
 
@@ -1522,7 +1537,7 @@ async def manual_soccer(
 ):
 
     await update.message.reply_text(
-        "🔎 Buscando FÚTBOL de HOY..."
+        "🔎 Buscando FÚTBOL de HOY Y MAÑANA..."
     )
 
     events = await asyncio.to_thread(
@@ -1540,7 +1555,7 @@ async def manual_soccer(
 
         await update.message.reply_text(
             "❌ No hay partidos de fútbol "
-            "disponibles para HOY."
+            "disponibles para HOY Y MAÑANA."
         )
 
         return
@@ -1554,7 +1569,7 @@ async def manual_soccer(
 
     await update.message.reply_text(
         f"⚽ FÚTBOL\n"
-        f"📅 HOY\n"
+        f"📅 HOY Y MAÑANA · hoy aparece primero\n"
         f"📊 {len(selected)} partidos"
     )
 
@@ -1602,7 +1617,7 @@ async def manual_nba(
 ):
 
     await update.message.reply_text(
-        "🔎 Buscando NBA de HOY..."
+        "🔎 Buscando NBA de HOY Y MAÑANA..."
     )
 
     events = await asyncio.to_thread(
@@ -1620,7 +1635,7 @@ async def manual_nba(
 
         await update.message.reply_text(
             "❌ No hay partidos NBA "
-            "disponibles para HOY."
+            "disponibles para HOY Y MAÑANA."
         )
 
         return
@@ -1634,7 +1649,7 @@ async def manual_nba(
 
     await update.message.reply_text(
         f"🏀 NBA\n"
-        f"📅 HOY\n"
+        f"📅 HOY Y MAÑANA · hoy aparece primero\n"
         f"📊 {len(selected)} partidos"
     )
 
@@ -2405,7 +2420,7 @@ async def start(
     await update.message.reply_text(
         "🤖 ValueEdgeBot activado.\n\n"
         "🕗 Automático: 8:00 AM NY\n"
-        "📅 Partidos: HOY\n"
+        "📅 Partidos: HOY Y MAÑANA\n"
         "📚 DraftKings + FanDuel\n\n"
         "⚾ /mlb\n"
         "⚽ /futbol\n"
@@ -2452,7 +2467,7 @@ async def post_init(
     )
 
     print(
-        "Partidos: HOY"
+        "Partidos: HOY Y MAÑANA"
     )
 
     print(
