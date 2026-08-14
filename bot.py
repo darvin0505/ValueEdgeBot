@@ -1210,12 +1210,14 @@ def format_pick_card(event, emoji, title, include_props=False):
         confidence = "🟢 ALTA"
     elif estimated >= 0.60:
         confidence = "🟡 MEDIA"
-    else:
+    elif estimated >= 0.52:
         confidence = "🟠 MODERADA"
+    else:
+        confidence = "🔴 BAJA"
 
     lines = [
         f"{emoji} {title}",
-        f"{event_away(event)} @ {event_home(event)}",
+        f"{event_away(event)} vs {event_home(event)}",
         f"📅 {date_text(event_date(event))} · {time_text(event_date(event))}",
         "",
         f"🎯 Pick: {selected} ML",
