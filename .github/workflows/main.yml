@@ -6,7 +6,8 @@ on:
       - main
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * *"
+    # GitHub-hosted runners are temporary. Reinicia el bot cada cuatro horas.
+    - cron: "17 */4 * * *"
 
 concurrency:
   group: valueedgebot-production
@@ -15,6 +16,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 235
 
     steps:
       - name: Descargar ValueEdgeBot
