@@ -33,6 +33,7 @@ jobs:
       - name: Ejecutar ValueEdgeBot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          SPORTSGAMEODDS_API_KEY: ${{ secrets.SPORTSGAMEODDS_API_KEY }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           API_SPORTS_KEY: ${{ secrets.API_SPORTS_KEY }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

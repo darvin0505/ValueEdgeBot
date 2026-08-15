@@ -168,10 +168,15 @@ def confidence_adjustment(event, selected_outcome):
 
 
 def source_text(event):
+    market_source = (
+        "SportsGameOdds"
+        if event.get("_source") == "sportsgameodds"
+        else "Odds-API.io"
+    )
     data = event.get("_external_analysis", {})
     if not data:
-        return "Mercado"
-    return "Mercado + " + data.get("source", "API-Sports")
+        return market_source
+    return market_source + " + " + data.get("source", "API-Sports")
 
 
 def agreement_text(event, selected_outcome):

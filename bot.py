@@ -13,6 +13,7 @@ from api_sports_analysis import (
     enrich_events,
     source_text,
 )
+import sportsgameodds
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -31,6 +32,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+SPORTSGAMEODDS_API_KEY = os.getenv("SPORTSGAMEODDS_API_KEY")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 BASE_URL = "https://api.odds-api.io/v3"
@@ -43,8 +45,6 @@ AUTO_HOUR = 8
 AUTO_MINUTE = 0
 
 AUTO_TOP = 5
-MANUAL_MIN = 7
-MANUAL_MAX = 10
 MIN_TWO_WAY_PROBABILITY = 0.54
 MIN_THREE_WAY_PROBABILITY = 0.42
 MIN_LEAD_OVER_SECOND = 0.035
@@ -82,8 +82,8 @@ SOCCER_LEAGUES = {
 if not BOT_TOKEN:
     raise ValueError("Falta BOT_TOKEN en .env")
 
-if not ODDS_API_KEY:
-    raise ValueError("Falta ODDS_API_KEY en .env")
+if not SPORTSGAMEODDS_API_KEY and not ODDS_API_KEY:
+    raise ValueError("Falta SPORTSGAMEODDS_API_KEY (o ODDS_API_KEY como respaldo) en .env")
 
 
 # =========================================================
@@ -260,6 +260,9 @@ def api_get(
     params=None
 ):
 
+    if not ODDS_API_KEY:
+        return None
+
     query = {
         "apiKey": ODDS_API_KEY
     }
@@ -342,6 +345,10 @@ def get_events(
 
 def get_soccer_events():
 
+    primary = sportsgameodds.get_events("football")
+    if primary is not None:
+        return primary
+
     result = []
 
     for league_slug, league_name in SOCCER_LEAGUES.items():
@@ -369,6 +376,10 @@ def get_soccer_events():
 
 def get_mlb_events():
 
+    primary = sportsgameodds.get_events("baseball")
+    if primary is not None:
+        return primary
+
     events = get_events(
         "baseball",
         "usa-mlb",
@@ -386,6 +397,10 @@ def get_mlb_events():
 
 
 def get_nba_events():
+
+    primary = sportsgameodds.get_events("basketball")
+    if primary is not None:
+        return primary
 
     events = get_events(
         "basketball",
@@ -453,8 +468,16 @@ def get_odds_for_events(events):
 
 def attach_odds(events):
 
+    # SportsGameOdds already returns events and odds together. Only the legacy
+    # fallback needs the second Odds-API.io request.
+    primary = [event for event in events if event.get("_odds")]
+    legacy_events = [event for event in events if not event.get("_odds")]
+
+    if not legacy_events:
+        return primary
+
     odds_data = get_odds_for_events(
-        events
+        legacy_events
     )
 
     odds_map = {
@@ -463,9 +486,9 @@ def attach_odds(events):
         if item.get("id") is not None
     }
 
-    result = []
+    result = list(primary)
 
-    for event in events:
+    for event in legacy_events:
 
         event_id = event.get(
             "id"
@@ -1344,6 +1367,12 @@ def save_pick(
                     ""
                 ),
 
+            "source":
+                event.get(
+                    "_source",
+                    "odds-api-io"
+                ),
+
             "home_team":
                 event_home(event),
 
@@ -1494,12 +1523,7 @@ async def manual_mlb(
 
         return
 
-    events.sort(
-        key=lambda event:
-            event_date(event)
-    )
-
-    selected = events[:max(MANUAL_MIN, min(MANUAL_MAX, len(events)))]
+    selected = sort_best(events)[:AUTO_TOP]
 
     await update.message.reply_text(
         f"⚾ MLB\n"
@@ -1569,12 +1593,7 @@ async def manual_soccer(
 
         return
 
-    events.sort(
-        key=lambda event:
-            event_date(event)
-    )
-
-    selected = events[:max(MANUAL_MIN, min(MANUAL_MAX, len(events)))]
+    selected = sort_best(events)[:AUTO_TOP]
 
     await update.message.reply_text(
         f"⚽ FÚTBOL\n"
@@ -1649,12 +1668,7 @@ async def manual_nba(
 
         return
 
-    events.sort(
-        key=lambda event:
-            event_date(event)
-    )
-
-    selected = events[:max(MANUAL_MIN, min(MANUAL_MAX, len(events)))]
+    selected = sort_best(events)[:AUTO_TOP]
 
     await update.message.reply_text(
         f"🏀 NBA\n"
@@ -1908,9 +1922,10 @@ async def best(
 # RESULTADOS
 # =========================================================
 
-def check_score(
-    event_id
-):
+def check_score(event_id, source="odds-api-io"):
+
+    if source == "sportsgameodds":
+        return sportsgameodds.get_score(str(event_id))
 
     data = api_get(
         f"events/{event_id}"
@@ -2064,9 +2079,11 @@ async def check_results(
             pick.get("id", "")
         )
 
+        source = pick.get("source", "odds-api-io")
+
         # Odds-API.io usa IDs numéricos.
         # Evitamos consultar IDs antiguos/inválidos.
-        if not event_id.isdigit():
+        if source != "sportsgameodds" and not event_id.isdigit():
             print(
                 f"Saltando ID inválido: {event_id}"
             )
@@ -2080,7 +2097,8 @@ async def check_results(
 
         result = await asyncio.to_thread(
             check_score,
-            int(event_id)
+            event_id if source == "sportsgameodds" else int(event_id),
+            source
         )
 
         if not result:
@@ -2372,17 +2390,11 @@ async def scheduler(
 
             current = now_ny()
 
+            # A short 8 AM window prevents a newly restarted GitHub runner from
+            # resending later the same day when its ephemeral state is empty.
             if (
-                current.hour >
-                AUTO_HOUR
-                or
-                (
-                    current.hour ==
-                    AUTO_HOUR
-                    and
-                    current.minute >=
-                    AUTO_MINUTE
-                )
+                current.hour == AUTO_HOUR
+                and AUTO_MINUTE <= current.minute < AUTO_MINUTE + 15
             ):
 
                 await automatic_send(
@@ -2464,7 +2476,9 @@ async def post_init(
     )
 
     print(
-        "Odds-API.io"
+        "SportsGameOdds (principal)"
+        if SPORTSGAMEODDS_API_KEY
+        else "Odds-API.io (respaldo)"
     )
 
     print(
