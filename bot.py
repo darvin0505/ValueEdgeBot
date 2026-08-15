@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -50,6 +51,8 @@ MIN_THREE_WAY_PROBABILITY = 0.42
 MIN_LEAD_OVER_SECOND = 0.035
 
 BOOKMAKERS = "DraftKings,FanDuel"
+API_CACHE_SECONDS = 600
+API_CACHE = {}
 
 
 # =========================================================
@@ -270,6 +273,18 @@ def api_get(
     if params:
         query.update(params)
 
+    # Upcoming events and odds only update periodically on the free plan.
+    # Reusing identical calls keeps Telegram command bursts below 100 req/hour.
+    cacheable = path == "events" or path == "odds/multi"
+    cache_key = (
+        path,
+        tuple(sorted((str(key), str(value)) for key, value in query.items()))
+    )
+    if cacheable:
+        cached = API_CACHE.get(cache_key)
+        if cached and time.monotonic() - cached[0] < API_CACHE_SECONDS:
+            return cached[1]
+
     try:
 
         response = requests.get(
@@ -297,7 +312,10 @@ def api_get(
 
     try:
 
-        return response.json()
+        payload = response.json()
+        if cacheable:
+            API_CACHE[cache_key] = (time.monotonic(), payload)
+        return payload
 
     except Exception:
 
@@ -474,7 +492,7 @@ def attach_odds(events):
     legacy_events = [event for event in events if not event.get("_odds")]
 
     if not legacy_events:
-        return primary
+        return [event for event in primary if draftkings_event_available(event)]
 
     odds_data = get_odds_for_events(
         legacy_events
@@ -505,7 +523,34 @@ def attach_odds(events):
 
         result.append(event)
 
-    return result
+    return [event for event in result if draftkings_event_available(event)]
+
+
+def draftkings_event_available(event):
+    """Only expose events with a complete, linkable DraftKings moneyline."""
+    odds = event.get("_odds", {})
+    bookmakers = odds.get("bookmakers", {})
+    draftkings = bookmakers.get("DraftKings") or bookmakers.get("Draftkings")
+    if not isinstance(draftkings, list):
+        return False
+
+    moneylines = [market for market in draftkings if market.get("name") == "ML"]
+    has_complete_line = any(
+        any(
+            row.get("home") is not None and row.get("away") is not None
+            for row in market.get("odds", [])
+        )
+        for market in moneylines
+    )
+    if not has_complete_line:
+        return False
+
+    # Odds-API.io supplies a direct event URL when the listing is currently
+    # mapped to DraftKings. SportsGameOdds does not expose legacy deep links,
+    # so its complete DraftKings market is sufficient.
+    if event.get("_source") == "sportsgameodds":
+        return True
+    return bool((odds.get("urls") or {}).get("DraftKings"))
 
 
 # =========================================================
@@ -600,6 +645,9 @@ def get_h2h(event):
     all_options = {}
 
     for bookmaker_name, markets in bookmakers.items():
+
+        if bookmaker_name.lower().replace(" ", "") != "draftkings":
+            continue
 
         if not isinstance(
             markets,

@@ -133,6 +133,8 @@ def _markets(event):
     if isinstance(books, list):
         books = {b.get("name", "Sportsbook"): b.get("markets", []) for b in books}
     for book, markets in books.items():
+        if norm(book).replace(" ", "") != "draftkings":
+            continue
         if isinstance(markets, dict):
             markets = markets.values()
         for market in markets or []:

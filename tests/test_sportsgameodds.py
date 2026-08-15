@@ -1,7 +1,12 @@
+import os
 import unittest
 from unittest.mock import patch
 
 import sportsgameodds
+
+os.environ.setdefault("BOT_TOKEN", "123456:TEST_TOKEN")
+os.environ.setdefault("ODDS_API_KEY", "test-key")
+import bot
 
 
 class SportsGameOddsAdapterTests(unittest.TestCase):
@@ -56,6 +61,29 @@ class SportsGameOddsAdapterTests(unittest.TestCase):
             sportsgameodds.get_score("opaque-event-id"),
             {"home": 5, "away": 4, "status": "settled"},
         )
+
+    def test_draftkings_filter_rejects_fanduel_only_event(self):
+        event = {
+            "_odds": {
+                "bookmakers": {
+                    "FanDuel": [{"name": "ML", "odds": [{"home": -120, "away": 110}]}]
+                },
+                "urls": {"FanDuel": "https://example.test/event"},
+            }
+        }
+        self.assertFalse(bot.draftkings_event_available(event))
+
+    def test_draftkings_filter_requires_complete_line_and_url(self):
+        event = {
+            "_odds": {
+                "bookmakers": {
+                    "DraftKings": [{"name": "ML", "odds": [{"home": -120, "away": 110}]}]
+                },
+                "urls": {"DraftKings": "https://sportsbook.draftkings.com/event/123"},
+            }
+        }
+        self.assertTrue(bot.draftkings_event_available(event))
+        self.assertEqual(bot.get_h2h(event)["bookmaker"], "DraftKings")
 
 
 if __name__ == "__main__":
