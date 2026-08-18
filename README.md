@@ -1,14 +1,15 @@
 # ValueEdgeBot
 
-Telegram bot that ranks market-based MLB, NBA, and soccer selections. It uses
+Telegram bot that ranks market-based MLB, WNBA, and soccer selections. It uses
 SportsGameOdds as its primary source, keeps Odds-API.io as an optional fallback,
 and sends the daily report at 8:00 AM in `America/New_York`.
 
 ## Commands
 
-- `/mlb`, `/nba`, `/futbol`: the strongest qualifying selections (7 by
-  default, configurable from 5 to 10 with `TOP_PICKS`).
+- `/mlb`, `/wnba`, `/futbol`: up to ten qualifying selections.
 - `/parlay`: up to ten qualifying MLB player props, ranked by ValueEdge score.
+- `/parlay_wnba`: up to ten WNBA player props for points, rebounds, assists,
+  threes, PRA, and supported combined markets.
 - `/best`: the strongest qualifying selections across all three sports.
 - `/historial`: verified wins, losses, pending picks, and the five latest
   settled results.

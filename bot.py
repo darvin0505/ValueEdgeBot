@@ -45,10 +45,7 @@ STATE_FILE = os.path.join(BASE_DIR, "valueedge_state.json")
 AUTO_HOUR = 8
 AUTO_MINUTE = 0
 
-try:
-    AUTO_TOP = max(5, min(10, int(os.getenv("TOP_PICKS", "7"))))
-except ValueError:
-    AUTO_TOP = 7
+AUTO_TOP = 10
 MIN_TWO_WAY_PROBABILITY = 0.54
 MIN_THREE_WAY_PROBABILITY = 0.42
 MIN_LEAD_OVER_SECOND = 0.035
@@ -336,7 +333,8 @@ def api_get(
 def get_events(
     sport,
     league=None,
-    limit=100
+    limit=100,
+    dates=None
 ):
 
     params = {
@@ -349,10 +347,10 @@ def get_events(
     if league:
         params["league"] = league
 
-    data = api_get(
-        "events",
-        params
-    )
+    requested_dates = set(dates or (now_ny().date(), now_ny().date() + timedelta(days=1)))
+    params["dateFrom"] = min(requested_dates).isoformat()
+    params["dateTo"] = (max(requested_dates) + timedelta(days=1)).isoformat()
+    data = api_get("events", params)
 
     if not data:
         return []
@@ -360,39 +358,17 @@ def get_events(
     return [
         event
         for event in data
-        if valid_event_date(event)
+        if event_day(event) in requested_dates
     ]
 
 
 def get_soccer_events():
-
-    primary = sportsgameodds.get_events("football")
-    if primary is not None:
-        return primary
-
-    result = []
-
-    for league_slug, league_name in SOCCER_LEAGUES.items():
-
-        events = get_events(
-           "football",
-           league_slug,
-            100
-        )
-
-        for event in events:
-
-            event["_league"] = (
-                league_name
-            )
-
-            event["_sport_key"] = (
-                "football"
-            )
-
-        result.extend(events)
-
-    return result
+    events = get_events("football", limit=1000)
+    for event in events:
+        league = event.get("league") or {}
+        event["_league"] = league.get("name") or "Futbol"
+        event["_sport_key"] = "football"
+    return events
 
 
 def get_mlb_events():
@@ -417,15 +393,10 @@ def get_mlb_events():
     return events
 
 
-def get_nba_events():
-
-    primary = sportsgameodds.get_events("basketball")
-    if primary is not None:
-        return primary
-
+def get_wnba_events():
     events = get_events(
         "basketball",
-        "usa-nba",
+        "usa-wnba",
         100
     )
 
@@ -433,7 +404,7 @@ def get_nba_events():
 
     for event in events:
 
-        event["_league"] = "NBA"
+        event["_league"] = "WNBA"
         event["_sport_key"] = (
             "basketball"
         )
@@ -910,6 +881,22 @@ def soccer_specials(event):
         (("correct score", "score exact", "marcador correcto"), "⚠️ MARCADOR CORRECTO · RIESGO ALTO"),
         (("result and total", "win and", "gana y", "combination"), "🔗 COMBINACIONES"),
     )
+
+
+def event_day(event):
+    dt = local_datetime(event_date(event))
+    return dt.date() if dt else None
+
+
+def select_top_events(events, limit=AUTO_TOP):
+    today = now_ny().date()
+    selected = sort_best([event for event in events if event_day(event) == today])[:limit]
+    if len(selected) < limit:
+        tomorrow = today + timedelta(days=1)
+        selected.extend(sort_best([
+            event for event in events if event_day(event) == tomorrow
+        ])[:limit - len(selected)])
+    return selected
     seen = set()
     for terms, heading in optional_markets:
         rows = get_market_fuzzy(event, terms)
@@ -946,7 +933,25 @@ def soccer_specials(event):
 # PROPS NBA
 # =========================================================
 
-def get_nba_props(event):
+WNBA_PROP_ALIASES = {
+    "points": "Puntos", "rebounds": "Rebotes", "assists": "Asistencias",
+    "threes": "Triples", "3-pointers made": "Triples", "3 pointers made": "Triples",
+    "pts+rebs+asts": "PRA", "points+rebounds+assists": "PRA",
+    "pts+rebs": "Puntos + Rebotes", "points+rebounds": "Puntos + Rebotes",
+    "pts+asts": "Puntos + Asistencias", "points+assists": "Puntos + Asistencias",
+    "rebs+asts": "Rebotes + Asistencias", "rebounds+assists": "Rebotes + Asistencias",
+}
+
+
+def _wnba_market(label):
+    lower = str(label or "").lower()
+    for key, display in sorted(WNBA_PROP_ALIASES.items(), key=lambda row: len(row[0]), reverse=True):
+        if f"({key})" in lower or lower.endswith(key):
+            return display
+    return None
+
+
+def get_wnba_props(event):
 
     odds = event.get(
         "_odds",
@@ -988,59 +993,40 @@ def get_nba_props(event):
                 []
             ):
 
-                player = (
-                    item.get("player")
-                    or item.get("label")
-                    or item.get("description")
-                )
-
-                side = (
-                    item.get("side")
-                    or item.get("name")
-                    or ""
-                )
-
-                point = (
-                    item.get("point")
-                    or item.get("hdp")
-                )
-
-                price = item.get(
-                    "price"
-                )
-
-                if not player or price is None:
+                label = item.get("player") or item.get("label") or item.get("description")
+                market_name = _wnba_market(label)
+                point = item.get("point", item.get("hdp"))
+                if not label or not market_name or point is None:
                     continue
-
-                probability = (
-                    american_probability(
-                        price
-                    )
-                )
-
-                props.append(
-                    {
-                        "market":
-                            market.get(
-                                "name",
-                                "Player Prop"
-                            ),
-                        "player":
-                            player,
-                        "side":
-                            side,
-                        "point":
-                            point,
-                        "price":
-                            price,
-                        "probability":
-                            probability,
-                        "bookmaker":
-                            bookmaker_name
-                    }
-                )
+                player = str(label).rsplit(" (", 1)[0].strip()
+                sides = [("OVER", item.get("over", item.get("over_price"))),
+                         ("UNDER", item.get("under", item.get("under_price")))]
+                available = [(side, price, american_probability(price)) for side, price in sides if price is not None]
+                total = sum(row[2] for row in available)
+                for side, price, raw in available:
+                    props.append({"market": market_name, "player": player, "side": side,
+                                  "point": point, "price": price,
+                                  "probability": raw / total if total else 0,
+                                  "bookmaker": bookmaker_name, "event": event})
 
     return props
+
+
+def best_wnba_props(events, limit=AUTO_TOP):
+    candidates = sorted(
+        [prop for event in events for prop in get_wnba_props(event)],
+        key=lambda prop: prop["probability"], reverse=True,
+    )
+    selected, players = [], set()
+    for prop in candidates:
+        key = prop["player"].casefold()
+        if key in players:
+            continue
+        selected.append(prop)
+        players.add(key)
+        if len(selected) == limit:
+            break
+    return selected
 
 
 # =========================================================
@@ -1230,7 +1216,7 @@ def format_game(
 
     if include_props:
 
-        props = get_nba_props(
+        props = get_wnba_props(
             event
         )
 
@@ -1707,7 +1693,7 @@ async def manual_mlb(
 
         return
 
-    selected = sort_best(events)[:AUTO_TOP]
+    selected = select_top_events(events)
 
     if not selected:
         await update.message.reply_text(
@@ -1783,7 +1769,7 @@ async def manual_soccer(
 
         return
 
-    selected = sort_best(events)[:AUTO_TOP]
+    selected = select_top_events(events)
 
     if not selected:
         await update.message.reply_text(
@@ -1835,17 +1821,17 @@ async def manual_soccer(
 # MANUAL NBA
 # =========================================================
 
-async def manual_nba(
+async def manual_wnba(
     update,
     context
 ):
 
     await update.message.reply_text(
-        "🔎 Buscando NBA de HOY Y MAÑANA..."
+        "🔎 Buscando WNBA de HOY Y MAÑANA..."
     )
 
     events = await asyncio.to_thread(
-        get_nba_events
+        get_wnba_events
     )
 
     events = await asyncio.to_thread(
@@ -1858,22 +1844,22 @@ async def manual_nba(
     if not events:
 
         await update.message.reply_text(
-            "❌ No hay partidos NBA "
+            "❌ No hay partidos WNBA "
             "disponibles para HOY Y MAÑANA."
         )
 
         return
 
-    selected = sort_best(events)[:AUTO_TOP]
+    selected = select_top_events(events)
 
     if not selected:
         await update.message.reply_text(
-            "⛔ NO APOSTAR\n\nNo hay selecciones NBA con ventaja y confianza suficientes."
+            "⛔ NO APOSTAR\n\nNo hay selecciones WNBA con ventaja y confianza suficientes."
         )
         return
 
     await update.message.reply_text(
-        f"🏀 NBA\n"
+        f"🏀 WNBA\n"
         f"📅 HOY Y MAÑANA · hoy aparece primero\n"
         f"📊 {len(selected)} partidos"
     )
@@ -1893,7 +1879,7 @@ async def manual_nba(
             format_pick_card,
             event,
             "🏀",
-            "NBA",
+            "WNBA",
             True
         )
 
@@ -1944,6 +1930,31 @@ def format_parlay(props):
     return "\n".join(lines)
 
 
+def format_mlb_prop(prop, position):
+    line = int(prop["line"]) if float(prop["line"]).is_integer() else prop["line"]
+    return "\n".join([
+        f"⚾ PARLAY MLB · OPCIÓN {position}/10", "", f"👤 {prop['player']}",
+        f"🧢 {prop['team']} vs {prop['opponent']}",
+        f"🎯 {prop['side']} {line} {prop['market']}",
+        f"📊 Probabilidad estimada: {prop['probability']:.1%}",
+        f"⭐ Score ValueEdge: {prop['score']:.1f}/100",
+        f"💵 {american(prop['price'])} · {prop['bookmaker']}",
+    ])
+
+
+def format_wnba_prop(prop, position):
+    event = prop["event"]
+    point = int(prop["point"]) if float(prop["point"]).is_integer() else prop["point"]
+    risk = "BAJO" if prop["probability"] >= .60 else "MEDIO" if prop["probability"] >= .54 else "ALTO"
+    return "\n".join([
+        f"🏀 PARLAY WNBA · OPCIÓN {position}/10", "", f"👤 {prop['player']}",
+        f"🏟️ {event_home(event)} vs {event_away(event)}",
+        f"🎯 {prop['market']}: {prop['side']} {point}",
+        f"📊 Probabilidad: {prop['probability']:.1%}", f"⚠️ Riesgo: {risk}",
+        f"💵 {american(prop['price'])} · {prop['bookmaker']}",
+    ])
+
+
 async def parlay(update, context):
 
     await update.message.reply_text(
@@ -1969,7 +1980,24 @@ async def parlay(update, context):
         )
         return
 
-    await send_text(context.bot, update.effective_chat.id, format_parlay(props))
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(f"⚾ PARLAY MLB · {len(props[:AUTO_TOP])} opciones")
+    for position, prop in enumerate(props[:AUTO_TOP], 1):
+        await send_text(context.bot, chat_id, format_mlb_prop(prop, position))
+
+
+async def parlay_wnba(update, context):
+    await update.message.reply_text("🔎 Analizando props WNBA disponibles...")
+    events = await asyncio.to_thread(get_wnba_events)
+    events = await asyncio.to_thread(attach_odds, events)
+    props = best_wnba_props(events)
+    if not props:
+        await update.message.reply_text("❌ No hay props WNBA compatibles disponibles para hoy o mañana.")
+        return
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(f"🏀 PARLAY WNBA · {len(props)} opciones")
+    for position, prop in enumerate(props, 1):
+        await send_text(context.bot, chat_id, format_wnba_prop(prop, position))
 
 
 # =========================================================
@@ -1993,14 +2021,14 @@ async def best(
         get_soccer_events
     )
 
-    nba = await asyncio.to_thread(
-        get_nba_events
+    wnba = await asyncio.to_thread(
+        get_wnba_events
     )
 
     all_events = (
         mlb +
         soccer +
-        nba
+        wnba
     )
 
     all_events = await asyncio.to_thread(
@@ -2020,7 +2048,7 @@ async def best(
         == "football"
     ]
 
-    nba = [
+    wnba = [
         e for e in all_events
         if e.get("_sport_key")
         == "basketball"
@@ -2028,7 +2056,7 @@ async def best(
 
     mlb = await asyncio.to_thread(enrich_events, mlb, "baseball")
     soccer = await asyncio.to_thread(enrich_events, soccer, "football")
-    nba = await asyncio.to_thread(enrich_events, nba, "basketball")
+    wnba = await asyncio.to_thread(enrich_events, wnba, "basketball")
 
     mlb = sort_best(
         mlb
@@ -2038,8 +2066,8 @@ async def best(
         soccer
     )[:AUTO_TOP]
 
-    nba = sort_best(
-        nba
+    wnba = select_top_events(
+        wnba
     )[:AUTO_TOP]
 
     groups = []
@@ -2085,7 +2113,7 @@ async def best(
             )
         )
 
-    for event in nba:
+    for event in wnba:
 
         save_pick(
             event,
@@ -2097,7 +2125,7 @@ async def best(
                 format_pick_card,
                 event,
                 "🏀",
-                "NBA",
+                "WNBA",
                 True
             )
         )
@@ -2409,14 +2437,14 @@ async def automatic_send(
         get_soccer_events
     )
 
-    nba = await asyncio.to_thread(
-        get_nba_events
+    wnba = await asyncio.to_thread(
+        get_wnba_events
     )
 
     all_events = (
         mlb +
         soccer +
-        nba
+        wnba
     )
 
     all_events = await asyncio.to_thread(
@@ -2436,7 +2464,7 @@ async def automatic_send(
         == "football"
     ]
 
-    nba = [
+    wnba = [
         e for e in all_events
         if e.get("_sport_key")
         == "basketball"
@@ -2444,7 +2472,7 @@ async def automatic_send(
 
     mlb = await asyncio.to_thread(enrich_events, mlb, "baseball")
     soccer = await asyncio.to_thread(enrich_events, soccer, "football")
-    nba = await asyncio.to_thread(enrich_events, nba, "basketball")
+    wnba = await asyncio.to_thread(enrich_events, wnba, "basketball")
 
     mlb = sort_best(
         mlb
@@ -2454,8 +2482,8 @@ async def automatic_send(
         soccer
     )[:AUTO_TOP]
 
-    nba = sort_best(
-        nba
+    wnba = select_top_events(
+        wnba
     )[:AUTO_TOP]
 
     delivered = False
@@ -2488,7 +2516,7 @@ async def automatic_send(
                 )
 
             parts.append(
-                "🔥 TOP 5 MLB\n\n"
+                "🔥 TOP 10 MLB\n\n"
                 +
                 "\n\n".join(
                     mlb_text
@@ -2520,18 +2548,18 @@ async def automatic_send(
                 )
 
             parts.append(
-                "🔥 TOP 5 FÚTBOL\n\n"
+                "🔥 TOP 10 FÚTBOL\n\n"
                 +
                 "\n\n".join(
                     soccer_text
                 )
             )
 
-        if nba:
+        if wnba:
 
             nba_text = []
 
-            for event in nba:
+            for event in wnba:
 
                 save_pick(
                     event,
@@ -2543,13 +2571,13 @@ async def automatic_send(
                         format_pick_card,
                         event,
                         "🏀",
-                        "NBA",
+                        "WNBA",
                         True
                     )
                 )
 
             parts.append(
-                "🔥 TOP 5 NBA\n\n"
+                "🔥 TOP 10 WNBA\n\n"
                 +
                 "\n\n".join(
                     nba_text
@@ -2574,6 +2602,46 @@ async def automatic_send(
 
     # Si la API no devolvió picks o falló el envío, el scheduler puede
     # reintentarlo en el próximo ciclo en vez de perder todo el día.
+    if delivered:
+        STATE["last_auto"] = today
+        save_state()
+
+
+async def automatic_send(application):
+    today = now_ny().date().isoformat()
+    if STATE.get("last_auto") == today or not STATE["subscribers"]:
+        return
+    mlb = await asyncio.to_thread(attach_odds, await asyncio.to_thread(get_mlb_events))
+    soccer = await asyncio.to_thread(attach_odds, await asyncio.to_thread(get_soccer_events))
+    wnba = await asyncio.to_thread(attach_odds, await asyncio.to_thread(get_wnba_events))
+    mlb = await asyncio.to_thread(enrich_events, mlb, "baseball")
+    soccer = await asyncio.to_thread(enrich_events, soccer, "football")
+    wnba = await asyncio.to_thread(enrich_events, wnba, "basketball")
+    groups = [
+        ("⚾ MLB", select_top_events(mlb), "⚾", "MLB", False),
+        ("⚽ FÚTBOL", select_top_events(soccer), "⚽", None, False),
+        ("🏀 WNBA", select_top_events(wnba), "🏀", "WNBA", True),
+    ]
+    mlb_props = await asyncio.to_thread(analyze_mlb_props, mlb)
+    wnba_props = best_wnba_props(wnba)
+    delivered = False
+    for chat_id in STATE["subscribers"]:
+        try:
+            for heading, events, emoji, title, include_props in groups:
+                if events:
+                    await application.bot.send_message(chat_id=chat_id, text=f"🔥 8:00 AM · {heading} · {len(events)} opciones")
+                for event in events:
+                    save_pick(event, chat_id)
+                    card = await asyncio.to_thread(format_pick_card, event, emoji, title or event.get("_league", "Fútbol"), include_props)
+                    if card:
+                        await send_text(application.bot, chat_id, card)
+            for position, prop in enumerate(mlb_props[:AUTO_TOP], 1):
+                await send_text(application.bot, chat_id, format_mlb_prop(prop, position))
+            for position, prop in enumerate(wnba_props, 1):
+                await send_text(application.bot, chat_id, format_wnba_prop(prop, position))
+            delivered = bool(any(events for _, events, _, _, _ in groups) or mlb_props or wnba_props)
+        except Exception as error:
+            print(f"Error automático: {error}")
     if delivered:
         STATE["last_auto"] = today
         save_state()
@@ -2657,8 +2725,9 @@ async def start(
         "📚 DraftKings + FanDuel\n\n"
         "⚾ /mlb\n"
         "⚽ /futbol\n"
-        "🏀 /nba\n"
+        "🏀 /wnba\n"
         "🧩 /parlay (props MLB)\n"
+        "🧩 /parlay_wnba (props WNBA)\n"
         "📚 /historial\n"
         "🔥 /best"
     )
@@ -2695,7 +2764,7 @@ async def post_init(
     )
 
     print(
-        "MLB + Fútbol + NBA"
+        "MLB + Fútbol + WNBA"
     )
 
     print(
@@ -2790,8 +2859,8 @@ app.add_handler(
 
 app.add_handler(
     CommandHandler(
-        "nba",
-        manual_nba
+        "wnba",
+        manual_wnba
     )
 )
 
@@ -2799,6 +2868,13 @@ app.add_handler(
     CommandHandler(
         "parlay",
         parlay
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "parlay_wnba",
+        parlay_wnba
     )
 )
 
