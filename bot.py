@@ -45,7 +45,10 @@ STATE_FILE = os.path.join(BASE_DIR, "valueedge_state.json")
 AUTO_HOUR = 8
 AUTO_MINUTE = 0
 
-AUTO_TOP = 5
+try:
+    AUTO_TOP = max(5, min(10, int(os.getenv("TOP_PICKS", "7"))))
+except ValueError:
+    AUTO_TOP = 7
 MIN_TWO_WAY_PROBABILITY = 0.54
 MIN_THREE_WAY_PROBABILITY = 0.42
 MIN_LEAD_OVER_SECOND = 0.035
@@ -896,6 +899,46 @@ def soccer_specials(event):
             ""
         ])
 
+    # Mercados adicionales: se muestran únicamente cuando el proveedor envía
+    # una línea y una cuota reales. No se fabrican a partir de BTTS ni del 1X2.
+    optional_markets = (
+        (("double chance", "doble oportunidad"), "🛡 DOBLE OPORTUNIDAD"),
+        (("first half", "1st half", "primera mitad"), "⏱ PRIMERA MITAD"),
+        (("corner",), "🚩 CÓRNERS"),
+        (("card", "tarjeta"), "🟨 TARJETAS"),
+        (("team to score first", "first team to score", "marca primero"), "🥅 EQUIPO QUE MARCA PRIMERO"),
+        (("correct score", "score exact", "marcador correcto"), "⚠️ MARCADOR CORRECTO · RIESGO ALTO"),
+        (("result and total", "win and", "gana y", "combination"), "🔗 COMBINACIONES"),
+    )
+    seen = set()
+    for terms, heading in optional_markets:
+        rows = get_market_fuzzy(event, terms)
+        display_rows = []
+        for item in rows:
+            label = item.get("label") or item.get("name") or item.get("side")
+            point = item.get("point", item.get("hdp", item.get("line")))
+            price = item.get("price", item.get("odds"))
+            if not label or price is None:
+                continue
+            key = (heading, str(label), str(point), str(price), item.get("bookmaker"))
+            if key in seen:
+                continue
+            seen.add(key)
+            suffix = f" {point}" if point not in (None, "") else ""
+            display_rows.append(f"• {label}{suffix}: {american(price)} · {item['bookmaker']}")
+        if display_rows:
+            lines.extend([heading, *display_rows[:3], ""])
+
+    external = event.get("_external_analysis", {})
+    predicted = external.get("predicted_score") or {}
+    if predicted.get("home") is not None and predicted.get("away") is not None:
+        lines.extend([
+            "⚠️ MARCADOR PROBABLE · RIESGO ALTO",
+            f"Modelo externo: {predicted['home']}-{predicted['away']}",
+            "Orientativo; no es una cuota ni un pick principal.",
+            "",
+        ])
+
     return lines
 
 
@@ -1077,7 +1120,7 @@ def format_game(
     if h2h:
 
         lines.extend([
-            "💰 MONEYLINE",
+            "💰 1X2 / MONEYLINE" if event.get("_sport_key") == "football" else "💰 MONEYLINE",
             ""
         ])
 
@@ -1145,7 +1188,7 @@ def format_game(
 
         lines.extend([
             "",
-            "📈 SPREAD"
+            "📈 HÁNDICAP" if event.get("_sport_key") == "football" else "📈 SPREAD"
         ])
 
         for item in spread[:6]:
@@ -1292,6 +1335,11 @@ def format_pick_card(event, emoji, title, include_props=False):
 
     selected = h2h["best_name"]
     estimated = probability(event)
+    outcomes = sorted(
+        (row["probability"] for row in h2h["outcomes"].values()), reverse=True
+    )
+    lead = outcomes[0] - outcomes[1] if len(outcomes) > 1 else 0.0
+    score = max(0, min(100, round(estimated * 100)))
 
     if estimated >= 0.72:
         confidence = "🟢 ALTA"
@@ -1307,10 +1355,13 @@ def format_pick_card(event, emoji, title, include_props=False):
         f"{event_away(event)} vs {event_home(event)}",
         f"📅 {day_label(event_date(event))} · {date_text(event_date(event))} · {time_text(event_date(event))}",
         "",
-        f"🎯 Pick: {selected} ML",
+        f"🎯 Pick: {selected} {'1X2' if event.get('_sport_key') == 'football' else 'ML'}",
         f"💵 Cuota: {american(h2h['best_price'])} · {h2h['bookmaker']}",
         f"📊 Probabilidad estimada: {estimated:.1%}",
+        f"⭐ Score ValueEdge: {score}/100",
         f"🛡 Confianza: {confidence}",
+        f"⚠️ Riesgo: {'BAJO' if estimated >= .70 else 'MEDIO' if estimated >= .60 else 'ALTO'}",
+        f"💡 Razón: líder del mercado por {lead:.1%}; cuotas sin margen normalizadas",
         f"🔎 {agreement_text(event, selected)}",
         f"📚 Fuentes: {source_text(event)}",
         f"🧪 {performance_text()}",
@@ -1335,6 +1386,31 @@ def performance_text():
         return f"Historial en calibración ({len(settled)}/10 resultados)"
     won = sum(1 for pick in settled if pick.get("won"))
     return f"Acierto histórico verificado: {won / len(settled):.1%} ({len(settled)} picks)"
+
+
+def history_text():
+    picks = list(STATE.get("picks", {}).values())
+    settled = [p for p in picks if p.get("settled") and isinstance(p.get("won"), bool)]
+    wins = sum(bool(p.get("won")) for p in settled)
+    losses = len(settled) - wins
+    pending = sum(not p.get("settled") for p in picks)
+    rate = f"{wins / len(settled):.1%}" if settled else "sin muestra"
+    lines = [
+        "📚 HISTORIAL VALUEEDGE",
+        f"✅ Ganadas: {wins}", f"❌ Perdidas: {losses}",
+        f"⏳ Pendientes: {pending}", f"📊 Acierto verificado: {rate}",
+    ]
+    recent = [p for p in picks if p.get("settled")][-5:]
+    if recent:
+        lines.append("")
+        for pick in reversed(recent):
+            icon = "✅" if pick.get("won") else "❌"
+            lines.append(f"{icon} {pick.get('outcome')} · {pick.get('score', 'N/A')}")
+    return "\n".join(lines)
+
+
+async def history(update, context):
+    await update.message.reply_text(history_text())
 
 
 def sort_best(events):
@@ -1573,6 +1649,12 @@ async def manual_mlb(
 
     selected = sort_best(events)[:AUTO_TOP]
 
+    if not selected:
+        await update.message.reply_text(
+            "⛔ NO APOSTAR\n\nNo hay selecciones MLB con ventaja y confianza suficientes."
+        )
+        return
+
     await update.message.reply_text(
         f"⚾ MLB\n"
         f"📅 HOY Y MAÑANA · hoy aparece primero\n"
@@ -1642,6 +1724,12 @@ async def manual_soccer(
         return
 
     selected = sort_best(events)[:AUTO_TOP]
+
+    if not selected:
+        await update.message.reply_text(
+            "⛔ NO APOSTAR\n\nNo hay selecciones de fútbol con ventaja y confianza suficientes."
+        )
+        return
 
     await update.message.reply_text(
         f"⚽ FÚTBOL\n"
@@ -1717,6 +1805,12 @@ async def manual_nba(
         return
 
     selected = sort_best(events)[:AUTO_TOP]
+
+    if not selected:
+        await update.message.reply_text(
+            "⛔ NO APOSTAR\n\nNo hay selecciones NBA con ventaja y confianza suficientes."
+        )
+        return
 
     await update.message.reply_text(
         f"🏀 NBA\n"
@@ -2495,6 +2589,7 @@ async def start(
         "⚽ /futbol\n"
         "🏀 /nba\n"
         "🧩 /parlay (props MLB)\n"
+        "📚 /historial\n"
         "🔥 /best"
     )
 
@@ -2634,6 +2729,13 @@ app.add_handler(
     CommandHandler(
         "parlay",
         parlay
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "historial",
+        history
     )
 )
 

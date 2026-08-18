@@ -123,6 +123,8 @@ def _soccer_prediction(row, event):
         "predicted": predicted,
         "external_probability": values.get(predicted, 0),
         "under_over": prediction.get("under_over"),
+        "predicted_score": prediction.get("goals") or {},
+        "winner_comment": (prediction.get("winner") or {}).get("comment"),
         "advice": prediction.get("advice"),
     }
 

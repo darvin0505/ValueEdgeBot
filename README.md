@@ -6,9 +6,12 @@ and sends the daily report at 8:00 AM in `America/New_York`.
 
 ## Commands
 
-- `/mlb`, `/nba`, `/futbol`: up to the five strongest qualifying selections.
+- `/mlb`, `/nba`, `/futbol`: the strongest qualifying selections (7 by
+  default, configurable from 5 to 10 with `TOP_PICKS`).
 - `/parlay`: up to ten qualifying MLB player props, ranked by ValueEdge score.
 - `/best`: the strongest qualifying selections across all three sports.
+- `/historial`: verified wins, losses, pending picks, and the five latest
+  settled results.
 
 The bot never pads a list with picks that fail its quality filters. Result
 notifications remain `GANADA` or `PERDIDA` after an event is finalized.
@@ -33,6 +36,7 @@ Optional:
 - `SPORTSGAMEODDS_BOOKMAKERS`: defaults to `draftkings,fanduel`.
 - `SPORTSGAMEODDS_CACHE_SECONDS`: defaults to 600 seconds, matching the free
   plan's update frequency and reducing monthly object usage.
+- `TOP_PICKS`: defaults to 7 and is constrained to the requested 5–10 range.
 
 For GitHub Actions, add the same values under **Settings → Secrets and
 variables → Actions**. At minimum add `BOT_TOKEN`,
@@ -42,7 +46,9 @@ variables → Actions**. At minimum add `BOT_TOKEN`,
 
 The SportsGameOdds Amateur plan currently lists MLB, NBA, MLS, and Champions
 League among its eight leagues and includes DraftKings/FanDuel, player props,
-scores, and results. PrizePicks is not listed on that free tier, so `/parlay`
+scores, and results. Soccer sections only show markets carrying a real provider
+line and price; API-Sports predicted scores are labeled high-risk context, not
+bettable odds. PrizePicks is not listed on that free tier, so `/parlay`
 uses available DraftKings/FanDuel lines. Soccer totals are used normally; BTTS
 is displayed only if the provider actually returns that market.
 
