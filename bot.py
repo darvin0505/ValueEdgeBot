@@ -1327,19 +1327,76 @@ def probability(event):
     return max(0.01, min(0.99, adjusted))
 
 
+def mlb_total_pick(event):
+    """Return a complete, no-vig MLB total only when the line is trustworthy."""
+    if event.get("_sport_key") != "baseball":
+        return None
+    candidates = []
+    for item in get_market(event, "Totals"):
+        if str(item.get("bookmaker", "")).lower().replace(" ", "") != "draftkings":
+            continue
+        line = item.get("hdp", item.get("point", item.get("line")))
+        try:
+            line = float(line)
+        except (TypeError, ValueError):
+            continue
+        # Evita pushes y líneas MLB anómalas o incompletas.
+        if line < 6.5 or line > 13.5 or line.is_integer():
+            continue
+        over_price = item.get("over_price")
+        under_price = item.get("under_price")
+        if over_price is None or under_price is None:
+            continue
+        over_raw = american_probability(over_price)
+        under_raw = american_probability(under_price)
+        vig = over_raw + under_raw
+        if vig <= 0:
+            continue
+        over_p, under_p = over_raw / vig, under_raw / vig
+        side, price, fair = (
+            ("Over", over_price, over_p) if over_p >= under_p
+            else ("Under", under_price, under_p)
+        )
+        if fair < 0.56:
+            continue
+        candidates.append({
+            "market": "total", "outcome": side, "line": line,
+            "price": price, "probability": fair,
+            "bookmaker": item["bookmaker"],
+            "reason": "línea completa de Over/Under con margen de la casa eliminado",
+        })
+    return max(candidates, key=lambda row: row["probability"], default=None)
+
+
+def selection_for_event(event):
+    h2h = get_h2h(event)
+    choices = []
+    if h2h:
+        choices.append({
+            "market": "moneyline", "outcome": h2h["best_name"], "line": None,
+            "price": h2h["best_price"], "probability": probability(event),
+            "bookmaker": h2h["bookmaker"],
+            "reason": "favorito del mercado después de eliminar el margen de la casa",
+        })
+    total = mlb_total_pick(event)
+    if total:
+        choices.append(total)
+    return max(choices, key=lambda row: row["probability"], default=None)
+
+
 def format_pick_card(event, emoji, title, include_props=False):
 
-    h2h = get_h2h(event)
-    if not h2h:
+    pick = selection_for_event(event)
+    if not pick:
         return None
 
-    selected = h2h["best_name"]
-    estimated = probability(event)
-    outcomes = sorted(
-        (row["probability"] for row in h2h["outcomes"].values()), reverse=True
-    )
-    lead = outcomes[0] - outcomes[1] if len(outcomes) > 1 else 0.0
+    selected = pick["outcome"]
+    estimated = pick["probability"]
     score = max(0, min(100, round(estimated * 100)))
+    market_label = (
+        f"{selected} {pick['line']} carreras" if pick["market"] == "total"
+        else f"{selected} {'1X2' if event.get('_sport_key') == 'football' else 'ML'}"
+    )
 
     if estimated >= 0.72:
         confidence = "🟢 ALTA"
@@ -1355,13 +1412,13 @@ def format_pick_card(event, emoji, title, include_props=False):
         f"{event_away(event)} vs {event_home(event)}",
         f"📅 {day_label(event_date(event))} · {date_text(event_date(event))} · {time_text(event_date(event))}",
         "",
-        f"🎯 Pick: {selected} {'1X2' if event.get('_sport_key') == 'football' else 'ML'}",
-        f"💵 Cuota: {american(h2h['best_price'])} · {h2h['bookmaker']}",
+        f"🎯 Pick: {market_label}",
+        f"💵 Cuota: {american(pick['price'])} · {pick['bookmaker']}",
         f"📊 Probabilidad estimada: {estimated:.1%}",
         f"⭐ Score ValueEdge: {score}/100",
         f"🛡 Confianza: {confidence}",
         f"⚠️ Riesgo: {'BAJO' if estimated >= .70 else 'MEDIO' if estimated >= .60 else 'ALTO'}",
-        f"💡 Razón: líder del mercado por {lead:.1%}; cuotas sin margen normalizadas",
+        f"💡 Razón: {pick['reason']}",
         f"🔎 {agreement_text(event, selected)}",
         f"📚 Fuentes: {source_text(event)}",
         f"🧪 {performance_text()}",
@@ -1419,20 +1476,22 @@ def sort_best(events):
 
     for event in events:
 
-        p = probability(
-            event
+        pick = selection_for_event(event)
+        if not pick:
+            continue
+        p = pick["probability"]
+        minimum = 0.56 if pick["market"] == "total" else (
+            MIN_THREE_WAY_PROBABILITY if len(get_h2h(event)["outcomes"]) >= 3
+            else MIN_TWO_WAY_PROBABILITY
         )
-
-        h2h = get_h2h(event)
         outcomes = sorted(
-            (item["probability"] for item in h2h["outcomes"].values()),
-            reverse=True
-        ) if h2h else []
-        minimum = MIN_THREE_WAY_PROBABILITY if len(outcomes) >= 3 else MIN_TWO_WAY_PROBABILITY
-        lead = outcomes[0] - outcomes[1] if len(outcomes) >= 2 else 0
-
-        # Un favorito apenas por encima del segundo no es una ventaja util.
-        if p >= minimum and lead >= MIN_LEAD_OVER_SECOND:
+            (row["probability"] for row in get_h2h(event)["outcomes"].values()),
+            reverse=True,
+        ) if pick["market"] == "moneyline" else []
+        lead_ok = pick["market"] == "total" or (
+            len(outcomes) >= 2 and outcomes[0] - outcomes[1] >= MIN_LEAD_OVER_SECOND
+        )
+        if p >= minimum and lead_ok:
 
             valid.append(
                 (
@@ -1462,21 +1521,22 @@ def save_pick(
     chat_id
 ):
 
-    h2h = get_h2h(
-        event
-    )
-
-    if not h2h:
+    selection = selection_for_event(event)
+    if not selection:
         return
 
     event_id = str(
         event["id"]
     )
+    state_key = ":".join((
+        event_id, selection["market"], selection["outcome"],
+        str(selection.get("line") or ""),
+    ))
 
     pick = STATE[
         "picks"
     ].get(
-        event_id
+        state_key
     )
 
     if not pick:
@@ -1504,17 +1564,17 @@ def save_pick(
                 event_away(event),
 
             "outcome":
-                h2h[
-                    "best_name"
-                ],
+                selection["outcome"],
+
+            "market": selection["market"],
+
+            "line": selection.get("line"),
 
             "price":
-                h2h[
-                    "best_price"
-                ],
+                selection["price"],
 
             "probability":
-                probability(event),
+                selection["probability"],
 
             "model_version":
                 "valueedge-2-api-sports",
@@ -1537,7 +1597,7 @@ def save_pick(
 
         STATE[
             "picks"
-        ][event_id] = pick
+        ][state_key] = pick
 
     if chat_id not in pick[
         "sent_to"
@@ -1872,7 +1932,7 @@ def format_parlay(props):
             f"   📊 Probabilidad estimada: {prop['probability']:.1%}",
             f"   ⭐ Score ValueEdge: {prop['score']:.1f}/100",
             f"   💵 {american(prop['price'])} · {prop['bookmaker']}",
-            "   ⏳ Alineación por confirmar" if prop.get("lineup_confirmed") is False else "   ✅ Alineación confirmada",
+            "   ✅ Abridor probable confirmado" if prop.get("market") == "Strikeouts" else "   ✅ Alineación confirmada",
             ""
         ])
 
@@ -2143,6 +2203,15 @@ def settle_result(
 
         return None
 
+    if pick.get("market") == "total":
+        try:
+            line = float(pick["line"])
+        except (TypeError, ValueError, KeyError):
+            return None
+        total = home + away
+        won = total > line if pick.get("outcome") == "Over" else total < line
+        return won, f"{int(home)} - {int(away)} (total {int(total)})"
+
     if home > away:
 
         winner = pick[
@@ -2271,7 +2340,8 @@ async def check_results(
             f"🏟️ "
             f"{pick['away_team']}\n\n"
             f"🎯 Tu selección: "
-            f"{pick['outcome']}\n"
+            f"{pick['outcome']}"
+            f" {pick.get('line', '') if pick.get('market') == 'total' else ''}\n"
             f"📊 Resultado: "
             f"{score}"
         )

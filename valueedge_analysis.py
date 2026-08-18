@@ -312,6 +312,10 @@ def analyze_mlb_props(events, season=None):
             if not stat:
                 continue
             preview_player = preview.get("players", {}).get(norm(item["player"]), {})
+            # La popularidad nunca es una señal. Sin presencia verificable en
+            # el roster del juego no se publica el jugador.
+            if not preview_player:
+                continue
             preview_stats = preview_player.get("stats", {})
             if preview_stats:
                 stat = {
@@ -332,14 +336,16 @@ def analyze_mlb_props(events, season=None):
                 team = preview_player["team"]
             opponent = away if norm(team) == norm(home) else home if norm(team) == norm(away) else f"{away} / {home}"
             score = 100 * probability + min(8, (stat.get("pa") or 0) / 75) + max(-4, min(8, (probability - market_p) * 100))
-            if item["kind"] != "Strikeouts" and preview_player.get("lineup_confirmed") and preview_player.get("on_bench"):
+            if item["kind"] != "Strikeouts" and (
+                not preview_player.get("lineup_confirmed")
+                or preview_player.get("on_bench")
+            ):
                 continue
-            if item["kind"] != "Strikeouts" and preview_player and not preview_player.get("lineup_confirmed"):
-                score -= 4
             if item["kind"] == "Strikeouts" and (
                 item["line"] < 2.5
                 or (stat.get("pa") or 0) < 30
-                or preview.get("probable_ids") and str(stat.get("player_id")) not in preview["probable_ids"]
+                or not preview.get("probable_ids")
+                or str(stat.get("player_id")) not in preview["probable_ids"]
             ):
                 continue
             if probability >= MIN_PROP_PROBABILITY and score >= MIN_PROP_SCORE:
