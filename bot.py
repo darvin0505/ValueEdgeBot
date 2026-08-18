@@ -881,22 +881,6 @@ def soccer_specials(event):
         (("correct score", "score exact", "marcador correcto"), "⚠️ MARCADOR CORRECTO · RIESGO ALTO"),
         (("result and total", "win and", "gana y", "combination"), "🔗 COMBINACIONES"),
     )
-
-
-def event_day(event):
-    dt = local_datetime(event_date(event))
-    return dt.date() if dt else None
-
-
-def select_top_events(events, limit=AUTO_TOP):
-    today = now_ny().date()
-    selected = sort_best([event for event in events if event_day(event) == today])[:limit]
-    if len(selected) < limit:
-        tomorrow = today + timedelta(days=1)
-        selected.extend(sort_best([
-            event for event in events if event_day(event) == tomorrow
-        ])[:limit - len(selected)])
-    return selected
     seen = set()
     for terms, heading in optional_markets:
         rows = get_market_fuzzy(event, terms)
@@ -927,6 +911,22 @@ def select_top_events(events, limit=AUTO_TOP):
         ])
 
     return lines
+
+
+def event_day(event):
+    dt = local_datetime(event_date(event))
+    return dt.date() if dt else None
+
+
+def select_top_events(events, limit=AUTO_TOP):
+    today = now_ny().date()
+    selected = sort_best([event for event in events if event_day(event) == today])[:limit]
+    if len(selected) < limit:
+        tomorrow = today + timedelta(days=1)
+        selected.extend(sort_best([
+            event for event in events if event_day(event) == tomorrow
+        ])[:limit - len(selected)])
+    return selected
 
 
 # =========================================================
